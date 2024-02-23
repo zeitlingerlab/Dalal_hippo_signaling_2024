@@ -1,0 +1,361 @@
+---
+title: "Plotting luciferase values in bar graphs"
+author: "Khyati Dalal"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    depth: 3
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{1028-02098-001-001}
+- \fancyfoot[LE,RO]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+editor_options:
+  chunk_output_type: console
+---
+# Introduction
+
+Generating prediction & contribution plot along with bar plot of regions for luciferase assay 
+
+# Computational Setup
+```{r, warning=F, message=F}
+#Standard packages
+library(rtracklayer) ; library(GenomicRanges); library(magrittr) ; library(Biostrings)
+library(ggplot2) ; library(reshape2); library(plyranges); library(Rsamtools);library(parallel);library(ggseqlogo)
+library(BSgenome.Mmusculus.UCSC.mm10);library(dplyr); library(data.table); library(patchwork); library(readr); library(testit)
+
+#KNITR Options
+setwd("/n/projects/kd2200/publication/bpnet/analysis/")
+options(knitr.figure_dir="figures/17_luci", java.parameters = "- Xmx6g")
+
+
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/granges_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/caching.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/knitr_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/motif_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/heatmap_common.r")
+
+
+```
+
+
+```{r,rin3 luciferase assay}
+
+motif_name=rep(c("a_control", "b_rin3_20", "c_rin3_60"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(383,0,0),c=c(77,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(380,350,530), c=c(87.2,69.5,72.9)) 
+
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="#C3AEF8",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+#Run paired pairwise t-tests
+#kudos : https://www.datanovia.com/en/blog/how-to-perform-paired-pairwise-t-tests-in-r/
+library(rstatix)
+library(ggpubr)
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = c(600,600,600))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.18)
+
+ggsave("figures/17_luci/rin3_luciferase_.pdf",z,height=5, width=8)
+ggsave("figures/17_luci/rin3_luciferase_.png",z,height=5, width=8)
+```
+
+```{r,ezr luciferase assay}
+
+motif_name=rep(c("a_control", "b_ezr_single", "c_ezr_double"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(368,0,0),c=c(525,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(378.09,292.59,430), c=c(650.13,518.52,475))
+
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="#48C9B0",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = c(800,800,800))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.18)
+z
+
+ggsave("figures/17_luci/ezr_luciferase_.pdf",z,height=5, width=8)
+ggsave("figures/17_luci/ezr_luciferase_.png",z,height=5, width=8)
+
+```
+
+```{r, Tjp1 luciferase assay}
+
+motif_name=rep(c("a_control", "b_WT", "c_mutall","e_secondhalfmut","d_firsthalfmut"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(73.4006734,0,0),c=c(22.22222222,0,0), e=c(37.71043771,0,0),d=c(23.56902357,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(87.90697674,73.66666667,70.73170732), c=c(9.76744186,26,29.71175166), d=c(26.51162791,39,55.654102), e=c(9.302325581,27,37.25055432))
+
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="#922B21",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = rep(c(90),each=10))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.18)
+z
+
+ggsave("figures/17_luci/tjp1_luciferase_.pdf",z,height=5, width=8)
+ggsave("figures/17_luci/tjp1_luciferase_.png",z,height=5, width=8)
+
+ggsave("figures/17_luci/tjp1_luciferase_1_.pdf",p,height=5, width=8)
+ggsave("figures/17_luci/tjp1_luciferase_1_.png",p,height=5, width=8)
+```
+
+```{r, amotl2 luciferase assay}
+
+motif_name=rep(c("a_control", "b_WT", "c_firsthalfmut", "d_secondhalfmut"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(32.996633,0,0),c=c(10.43771044,0,0), d=c(6.397306397,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(41.86046512,31.66666667,29.93348115), c=c(5.581395349,15,15.07760532),d=c(4.651162791,8,7.317073171))
+
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="#6C3483",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = rep(c(40),each=6))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.05)
+z
+
+ggsave("figures/17_luci/amotl2_luciferase_.pdf",z,height=5, width=8)
+ggsave("figures/17_luci/amotl2_luciferase_.png",z,height=5, width=8)
+
+ggsave("figures/17_luci/amotl2_luciferase_1_.pdf",p,height=5, width=8)
+ggsave("figures/17_luci/amotl2_luciferase_1_.png",p,height=5, width=8)
+
+```
+
+```{r, bmp7 luciferase assay}
+#tty activity
+
+motif_name=rep(c("a_control", "b_WT", "c_tfap2cmut", "d_tead4mut", "e_yap1mut"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(481.4814815,0,0),c=c(121.5488215,0,0), d=c(106.3973064,0,0), e=c(4.377104377,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(546.0465116,510,424.5898004), c=c(137.6744186,142,89.35698448),d=c(126.9767442,108.6666667,89.13525499),e=c(3.674418605,6,3.76940133))
+
+
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="#F39C12",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = rep(c(700),each=10))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.05)
+z
+
+ggsave("figures/17_luci/tty_luciferase_.pdf",z,height=5, width=8)
+ggsave("figures/17_luci/tty_luciferase_.png",z,height=5, width=8)
+
+ggsave("figures/17_luci/tty_luciferase_1_.pdf",p,height=5, width=8)
+ggsave("figures/17_luci/tty_luciferase_1_.png",p,height=5, width=8)
+```
+
+```{r, Dst & Adcy7 luciferase assay}
+
+#dec
+motif_name=rep(c("a_control", "b_118bpdis", "c_75bpdis", "d_30bpdis"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(69.75341797,0,0),c=c(76.54785156,0,0), d=c(140.0683594,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(51.28760951,98.54270302,51.98162967), c=c(60.42738971,72.33822254,63),d=c(81.45712261,154.5577193,105))
+# foldchange_rep=c(a=c(1,1,1),b=c(51.28760951,70.54270302,60.98162967), c=c(75.42738971,72.33822254,80),d=c(120.45712261,154.5577193,105))
+
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="#9C640C",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = rep(c(160),each=6))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.05)
+z
+
+ggsave("figures/17_luci/tty_dec_luciferase_.pdf",z,height=5, width=8)
+ggsave("figures/17_luci/tty_dec_luciferase_.png",z,height=5, width=8)
+
+ggsave("figures/17_luci/tty_dec_luciferase_1_.pdf",p,height=5, width=8)
+ggsave("figures/17_luci/tty_dec_luciferase_1_.png",p,height=5, width=8)
+
+#opti
+
+motif_name=rep(c("a_control", "b_42bpdis", "c_90mutbpdis", "d_20bpdis"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(40.52631579,0,0),c=c(4.561403509,0,0), d=c(141.0526316,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(35.50698174,39.79166667,42.26143798), c=c(2.950590763,5,3.948979766),d=c(129.75295381,167.2916667,152.2344253))
+
+#foldchange_average=c(a=c(1,0,0),b=c(30.52631579,0,0),c=c(4.561403509,0,0), d=c(141.0526316,0,0))
+#foldchange_rep=c(a=c(1,1,1),b=c(7.50698174,39.79166667,42.26143798), c=c(2.950590763,5,3.948979766),d=c(39.75295381,187.2916667,152.2344253))
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="#117864",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = rep(c(150),each=6))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.05)
+z
+
+ggsave("figures/17_luci/tty_incdec_luciferase_.pdf",z,height=5, width=8)
+ggsave("figures/17_luci/tty_incdec_luciferase_.png",z,height=5, width=8)
+
+ggsave("figures/17_luci/tty_incdec_luciferase_1_.pdf",p,height=5, width=8)
+ggsave("figures/17_luci/tty_incdec_luciferase_1_.png",p,height=5, width=8)
+
+```
+
+```{r, cited2 luciferase assay}
+library(stats)
+
+motif_name=rep(c("a_control", "b_wt", "c_strong_tead4double", "d_weak_tead4double"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(15.49,0,0),c=c(132.33,0,0), d=c(27.61,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(13.96,21.67,12.64), c=c(139.54,160,105.77),d=c(33.96,24.34,18.19))
+
+
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="#633974",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = rep(c(160),each=6))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.05)
+z
+
+ggsave("figures/17_luci/cited2_luciferase_.pdf",z,height=5, width=8)
+ggsave("figures/17_luci/cited2_luciferase_.png",z,height=5, width=8)
+
+ggsave("figures/17_luci/cited2_luciferase_1_.pdf",p,height=5, width=8)
+ggsave("figures/17_luci/cited2_luciferase_1_.png",p,height=5, width=8)
+
+
+```
+
+
+# lucifease values with wild-type region only
+```{r,lucifease values with all wild-type region only}
+
+motif_name=rep(c("a_control", "b_Bmp7", "c_Rin3","d_Ezr","e_Tjp1","f_Amotl2","g_adyc7","h_dst","i_cited2"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(481.4814815,0,0),c=c(480,0,0),d=c(492,0,0),e=c(73.4006734,0,0),f=c(32.996633,0,0)
+                    ,g=c(69.75341797,0,0),h=c(30.52631579,0,0),i=c(15.49,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(546.0465116,510,424.5898004),c=c(470,364,500),d=c(458.09,352.59,549),
+                 e=c(87.90697674,73.66666667,70.73170732),f=c(41.86046512,31.66666667,29.93348115),
+                 g=c(51.28760951,98.54270302,51.98162967),h=c(7.50698174,39.79166667,42.26143798),i=c(13.96,21.67,12.64))
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+motif_name2=rep(c("a_control","e_Tjp1","f_Amotl2","g_adyc7","h_dst","i_cited2"),each=3)
+foldchange2_average=c(a=c(1,0,0),e=c(73.4006734,0,0),f=c(32.996633,0,0)
+                     ,g=c(69.75341797,0,0),h=c(30.52631579,0,0),i=c(15.49,0,0))
+foldchange2_rep=c(a=c(1,1,1),e=c(87.90697674,73.66666667,70.73170732),f=c(41.86046512,31.66666667,29.93348115),
+                 g=c(51.28760951,98.54270302,51.98162967),h=c(27.50698174,39.79166667,42.26143798),i=c(13.96,21.67,12.64))
+df2 <- data.frame(motif_name2, foldchange2_average, foldchange2_rep)
+
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average,fill=motif_name)) +scale_fill_brewer(palette="Set1")+
+  geom_bar(stat="identity",width=0.7)+geom_point(stat = "identity",size=0.5, aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+p2 <- ggplot(data=df2, aes(x=motif_name2, y=foldchange2_average,fill=motif_name2)) +scale_fill_brewer(palette="Set2")+
+  geom_bar(stat="identity",width=0.7)+geom_point(stat = "identity",size=0.5, aes(y=foldchange2_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+
+ggsave("figures/17_luci/luci_wt_only_part1.pdf",p,height=5, width=8)
+ggsave("figures/17_luci/luci_wt_only_part1.png",p,height=5, width=8)
+
+ggsave("figures/17_luci/luci_wt_only_part2.pdf",p2,height=5, width=8)
+ggsave("figures/17_luci/luci_wt_only_part2.png",p2,height=5, width=8)
+
+
+```
+
+# Session information
+
+For reproducibility, this analysis was performed with the following R/Bioconductor session:
+
+``` {r session_info, echo=FALSE, comment=NA}
+sessionInfo()
+```
+
+
