@@ -1,7 +1,7 @@
 ---
 Date: Feb 2024
 Purpose: Give setup directions for Hippo signaling paper
-Thanks and Kudos to Melanie Weilert for majority of the scripts!
+Thanks, and Kudos: to Melanie Weilert for the majority of the scripts!
 ---
 
 # Introduction
@@ -56,7 +56,7 @@ In order to process the data, navigate to the `data_preparation/` folder, then t
 
 The rendered .ipynb and .Rmd files are under the `analysis/` folder. Files are numbered in the order by which they were run. Raw figures can be found here as well as code and associated scripts to run analysis.
 
-# The prep and analysis in this folder were done in following order:
+## The prep and analysis in this folder were done in following order:
 1) The `bpnet_prep/` folder is where I had processed binding data with snamekmake and was used to train BPNet model
 2) The `data_preperation/` folder is where I ran snakemake to generate all bws of different datasets including binding data.
 3) The `bpnet/` folder has BPNet model outputs and analyses associated with it.
