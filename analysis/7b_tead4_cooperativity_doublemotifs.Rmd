@@ -1,0 +1,188 @@
+---
+title: "Tead4 double cooperativity in mtsc & mesc"
+author: "Khyati Dalal"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    depth: 3
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{1028-02098-001-001}
+- \fancyfoot[LE,RO]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+editor_options:
+  chunk_output_type: console
+---
+
+# Introduction
+
+The goal of this analysis to see if Tead4 can bind cooperatively at Tead4 double motifs mapped in mtsc and mesc cell lines.
+
+# Computational Setup
+
+```{r, warning=F, message=F}
+#Standard packages
+library(rtracklayer) ; library(GenomicRanges); library(magrittr) ; library(Biostrings)
+library(ggplot2) ; library(reshape2); library(plyranges); library(Rsamtools);library(parallel)
+library(dplyr); library(data.table); library(patchwork); library(readr); library(testit);
+library(BSgenome.Mmusculus.UCSC.mm10);library(tidyr)
+
+#KNITR Options
+setwd("/n/projects/kd2200/publication/bpnet/analysis/")
+options(knitr.figure_dir="figures/7b_tead4_cooperativity_doublemotifs/", java.parameters = "- Xmx6g")
+
+#Lab sources
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/granges_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/load_motif_instance_from_all_regions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/caching.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/knitr_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/motif_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/heatmap_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_functions_yue.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/1.motif_summary/tsc_variables.R")
+
+
+```
+
+
+#check double motifs regions from tsc and esc model
+```{r, tead4 motifs prep}
+
+##tsc model
+model_path2= "/n/projects/kd2200/publication/bpnet/cwm_all_regions/"
+tead4.gr <- load_motif_instance_from_all_regions(model_path2,"tead4","p0", filter_TE = TRUE) %>% dplyr::mutate(., tf = "Tead4")
+tead4_double.gr <- load_motif_instance_from_all_regions(model_path2,"tead4","p1", filter_TE = TRUE) %>% dplyr::mutate(., tf = "Tead4_double")
+mm10_promoters <-promoters(TxDb.Mmusculus.UCSC.mm10.knownGene,upstream=1000, downstream=500)
+tead4_no_promoter.gr <- tead4.gr[which(!overlapsAny(tead4.gr,mm10_promoters, ignore.strand=T))]
+tead4_double_no_promoter.gr <- tead4_double.gr[which(!overlapsAny(tead4_double.gr,mm10_promoters, ignore.strand=T))]
+
+#remove overlaps if any
+tead4_double_no_promoter_only.gr <- tead4_double_no_promoter.gr[which(!overlapsAny(tead4_double_no_promoter.gr,tead4_no_promoter.gr, minoverlap = 4, ignore.strand=T))]
+tead4_double_no_promoter_only.gr$pattern_start <- start(tead4_double_no_promoter_only.gr)
+tead4_double_no_promoter_only.gr$pattern_end <- end(tead4_double_no_promoter_only.gr)
+
+# resize & save Tead4 double  motif regions for equal half site length simulations 
+tead4_double_no_promoter_only.gr <- resize(tead4_double_no_promoter_only.gr, 18,"start")
+readr::write_tsv(as.data.frame(tead4_double_no_promoter_only.gr), 'tsv/tead4_double_motifs_no_ov_noerv_no_promoter_cwm_fold5_test.tsv.gz')
+
+----------
+##for esc model
+tead4_esc <- read_tsv("/n/projects/kd2200/publication/bpnet/bpnet_single_tead4_esc/tead4_esc/modisco/profile/dataspec.yaml_default_fold_6/tead4_esc/motif-instances-all-regions.tsv.gz")
+
+# subset the double mtoif pattern
+tead4_esc <- dplyr::filter(tead4_esc,pattern=="metacluster_0/pattern_1")
+  
+#make grange object
+tead4_esc.gr <- tead4_esc %>% makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based = T, start.field = "pattern_start_abs", end.field = "pattern_end_abs",seqnames.field = "example_chrom")
+
+# remove ervs
+rm <- readRDS("/n/projects/kd2200/publication/bpnet/analysis/data/repeatmasker.mm10.gr.rds")
+erv <- rm[grep("ERV", rm$repeat_class)]
+tead4_esc.gr <- tead4_esc.gr[which(!overlapsAny(tead4_esc.gr, erv, ignore.strand=T))]
+
+#remove promoter regions
+tead4_esc_no_promoter.gr <- tead4_esc.gr[which(!overlapsAny(tead4_esc.gr,mm10_promoters, ignore.strand=T))]
+tead4_esc_no_promoter.gr$pattern_motif_start <- start(tead4_esc_no_promoter.gr)
+tead4_esc_no_promoter.gr$pattern_motif_end <- end(tead4_esc_no_promoter.gr)
+
+# resize & save Tead4 double  motif regions for equal half site length simulations 
+tead4_esc_no_promoter_resize.gr <- resize(tead4_esc_no_promoter.gr, 18,"start")
+readr::write_tsv(as.data.frame(tead4_esc_no_promoter_resize.gr), 'tsv/tead4_double_escsingletask_motifs_noerv_no_promoter_cwm_test.tsv.gz')
+
+
+```
+
+## cooperativity plot at mTSC and mESC tead4 double motifs
+```{r}
+
+##mTSCs
+quantile.df <- read_tsv("tsv/tead4_double_motif_contrib_over_combo_completehalfs_quantiles.tsv.gz")
+counts.df <- read.csv("csv/all_counts_summary_predictions_genomic_regions_9mer.csv.gz")
+counts.df <- dplyr::filter(counts.df, task=="tead4")
+counts_wider.df <- pivot_wider(counts.df, names_from = "inj_state", values_from = "counts")
+colnames(quantile.df) <- c('combo_index','first_half_site','second_half_site','first_half_site_contrib','second_half_site_contrib', 'first_half_site_q','second_half_site_q')
+
+counts_wider.df$real_WT <- counts_wider.df$WT-counts_wider.df$dAdB
+counts_wider.df$real_da <- counts_wider.df$dA-counts_wider.df$dAdB
+counts_wider.df$real_db <- counts_wider.df$dB-counts_wider.df$dAdB
+final_wt_tead4 <- full_join(counts_wider.df, quantile.df, by=c('combo_index', 'first_half_site', 'second_half_site'))
+
+final_wt_tead4$expected <- final_wt_tead4$real_da+final_wt_tead4$real_db
+tead4_with_half_site_seq_info <- read_tsv("tsv/cwm_tead4double_noervs_nopromoter_withseq.tsv.gz")
+
+tead4_with_half_site_seq_info$second_half_site <- tead4_with_half_site_seq_info$second_half_site_seq
+tead4_with_half_site_seq_info$first_half_site <- tead4_with_half_site_seq_info$first_half_site_seq
+combine_pred_seq_match <- inner_join(tead4_with_half_site_seq_info, final_wt_tead4, by=c("first_half_site","second_half_site"))
+
+
+combine_pred_seq_match <- combine_pred_seq_match %>% dplyr::arrange(desc(real_WT))
+combine_pred_seq_match_sel <- combine_pred_seq_match %>%dplyr::mutate(rank= 1:nrow(combine_pred_seq_match))
+combine_pred_seq_match_sel <- combine_pred_seq_match_sel[1:5000,]
+
+# plot directly the cooperative over expected (additive)
+combine_sel2 <- combine_pred_seq_match_sel %>% dplyr::select(real_WT, expected,rank,seq_match_cat)
+
+wt_motif_longer.df <- combine_sel2 %>% pivot_longer(!c(rank,seq_match_cat), names_to = "condition", values_to = "pred_tead4_sig")
+
+g <- ggplot(wt_motif_longer.df,aes(rank,  pred_tead4_sig,colour = factor(condition))) + geom_line(size=1.2)+theme_classic()
+
+ggsave("figures/7b_tead4_cooperativity_doublemotifs/mtsc_cooperativity.pdf", g, height = 4, width = 6)
+
+##mesc
+quantile.df <- read_tsv("tsv/tead4_double_motif_contrib_over_combo_completehalfs_quantiles_esc_singlemodel.tsv.gz")
+counts.df <- read.csv("csv/all_counts_summary_predictions_genomic_regions_9mer_singlemodel.csv.gz")
+counts.df <- dplyr::filter(counts.df, task=="tead4_esc")
+counts_wider.df <- pivot_wider(counts.df, names_from = "inj_state", values_from = "counts")
+colnames(quantile.df) <- c('combo_index','first_half_site','second_half_site','first_half_site_contrib','second_half_site_contrib', 'first_half_site_q','second_half_site_q')
+
+counts_wider.df$real_WT <- counts_wider.df$WT-counts_wider.df$dAdB
+counts_wider.df$real_da <- counts_wider.df$dA-counts_wider.df$dAdB
+counts_wider.df$real_db <- counts_wider.df$dB-counts_wider.df$dAdB
+final_wt_tead4 <- full_join(counts_wider.df, quantile.df, by=c('combo_index', 'first_half_site', 'second_half_site'))
+
+final_wt_tead4$expected <- final_wt_tead4$real_da+final_wt_tead4$real_db
+tead4_with_half_site_seq_info <- read_tsv("tsv/tead4_double_escsingletask_motifs_noerv_no_promoter_cwm_withseq.tsv.gz")
+
+tead4_with_half_site_seq_info$second_half_site <- tead4_with_half_site_seq_info$second_half_site_seq
+tead4_with_half_site_seq_info$first_half_site <- tead4_with_half_site_seq_info$first_half_site_seq
+combine_pred_seq_match <- inner_join(tead4_with_half_site_seq_info, final_wt_tead4, by=c("first_half_site","second_half_site"))
+
+
+combine_pred_seq_match <- combine_pred_seq_match %>% dplyr::arrange(desc(real_WT))
+combine_pred_seq_match_sel <- combine_pred_seq_match %>%dplyr::mutate(rank= 1:nrow(combine_pred_seq_match))
+combine_pred_seq_match_sel <- combine_pred_seq_match_sel[1:500,]
+
+# plot directly the cooperative over expected (additive)
+combine_sel2 <- combine_pred_seq_match_sel %>% dplyr::select(real_WT, expected,rank,seq_match_cat)
+
+wt_motif_longer.df <- combine_sel2 %>% pivot_longer(!c(rank,seq_match_cat), names_to = "condition", values_to = "pred_tead4_sig")
+
+g <- ggplot(wt_motif_longer.df,aes(rank,  pred_tead4_sig,colour = factor(condition))) + geom_line(size=1.2)+theme_classic()
+
+ggsave("figures/7b_tead4_cooperativity_doublemotifs/mesc_cooperativity.pdf", g, height = 4, width = 6)
+
+
+```
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+## Including Plots
+
+You can also embed plots, for example:
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

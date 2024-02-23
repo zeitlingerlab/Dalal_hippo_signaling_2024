@@ -1,0 +1,373 @@
+---
+title: "Tead4 double motif analysis"
+author: "Khyati Dalal"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    depth: 3
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{1028-02098-001-001}
+- \fancyfoot[LE,RO]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+editor_options:
+  chunk_output_type: console
+---
+
+# Introduction
+
+The goal of this analysis is to summarize again the PWM, CWM, ChIP-nexus binding in form of metapeak and heatmap of Tead4 double motifs. Also, explore tead4 doubles sequences.
+
+# Computational Setup
+
+```{r, warning=F, message=F}
+#Standard packages
+library(rtracklayer) ; library(GenomicRanges); library(magrittr) ; library(Biostrings);library(parallel);
+library(ggplot2) ; library(reshape2); library(plyranges); library(Rsamtools);library(BSgenome.Mmusculus.UCSC.mm10);
+library(dplyr); library(data.table);library(patchwork);library(readr);library(tidyverse);library(forcats);library(utils); library(testit);library("TxDb.Mmusculus.UCSC.mm10.knownGene"); library(viridis);library(DECIPHER);library(readr)
+
+#KNITR Options
+setwd("/n/projects/kd2200/publication/bpnet/analysis/")
+options(knitr.figure_dir="figures/9_tead4_double_motif_analysis", java.parameters = "- Xmx6g")
+
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/granges_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/load_motif_instance_from_all_regions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/caching.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/multiplot.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/knitr_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/motif_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_functions_yue.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/1.motif_summary/tsc_variables.R")
+
+#Specific sources
+library(ggseqlogo)
+```
+
+
+
+## heatmap at single and double tead4 motifs.
+```{r}
+##CWM_all motif regions
+model_path2= "/n/projects/kd2200/publication/bpnet/cwm_all_regions/"
+tead4.gr <- load_motif_instance_from_all_regions(model_path2,"tead4","p0",filter_TE = TRUE) %>% dplyr::mutate(., tf = "Tead4")
+tead4_double.gr <- load_motif_instance_from_all_regions(model_path2,"tead4","p1",filter_TE = TRUE) %>% dplyr::mutate(., tf = "Tead4_double")
+
+#remove any overlaps
+tead4_only.gr <- tead4.gr[which(!overlapsAny(tead4.gr,tead4_double.gr, ignore.strand=T,minoverlap = 4))]
+tead4_double_only.gr <- tead4_double.gr[which(!overlapsAny(tead4_double.gr,tead4.gr, ignore.strand=T,minoverlap = 4))]
+
+#calculate signal
+tead4_double_only.gr$signal <- nexus_regionSums(resize(tead4_double_only.gr, 51, "center"), tsc.actual.norm.bws$tead4)
+tead4_only.gr$signal <- nexus_regionSums(resize(tead4_only.gr, 51, "center"), tsc.actual.norm.bws$tead4)
+
+#remove regions without ChIP-nexus reads
+tead4_only.gr <- tead4_only.gr[order(tead4_only.gr$signal,decreasing = T)][1:35000]
+tead4_double_only.gr <- tead4_double_only.gr[order(tead4_double_only.gr$signal,decreasing = T)][1:4000]
+
+# list the two region set
+tead4_motifs <- list(tead4_single=tead4_only.gr, tead4_double=tead4_double_only.gr)
+
+# plot
+polt <-plot_multiple_gr_nexus_heatmap(tead4_motifs, sample = tsc.actual.norm.bws$tead4, order = "sum",upstream = 50, downstream = 51, title = "Tead4",output_file_name = "figures/9_tead4_double_motif_analysis/tead4_heatmap_at_single_and_double_motifs.pdf")
+```
+
+## make side barplot of freq for sequence plot
+```{r}
+td4_tdbl4_pred <- read_csv('/n/projects/kd2200/publication/bpnet/analysis/csv/preds_summary_affinity.csv')
+tead4_single <- dplyr::filter(td4_tdbl4_pred,motif=="Tead4")
+tead4_double <- dplyr::filter(td4_tdbl4_pred,motif=="Tead4-Tead4")
+tead4_single$row_2 <- 1:nrow(tead4_single)
+td4 <- ggplot(tead4_single,aes(rev(row_2),frequency))+geom_bar(stat="identity")+coord_flip()+ geom_density(stat = "identity", alpha = 0.3, aes(fill="blue", color="blue"))+theme_minimal()+ylab("Motif frequency")+xlab("Ranked rows")
+
+ggsave("figures/9_tead4_double_motif_analysis/tead4_sidebarplot_frequency_plot.pdf",td4,height=4, width=7)
+
+tead4_double$row_2 <- 1:nrow(tead4_double)
+tdbl4 <- ggplot(tead4_double,aes(rev(row_2),frequency))+geom_bar(stat="identity")+coord_flip()+ geom_density(stat = "identity", alpha = 0.3, aes(fill="blue", color="blue"))+theme_minimal()+ylab("Motif frequency")+xlab("Ranked rows")
+    
+ggsave("figures/9_tead4_double_motif_analysis/tdbl4_sidebarplot_frequency_plot.pdf",tdbl4,height=4, width=7)
+```
+
+
+## plot luciferase assay of cited2 region (single motif >> double motifs)
+```{r}
+# values from insilico motif inj and count prediction.
+df <- data.frame(motif_name=c("a_control", "b_Tead4_single", "c_Tead4_double_rank0", "Tead4_double_rank39"),
+                 count=c(1,15.99326599,132.3232323,27.60942761))
+head(df)
+
+motif_name=rep(c("a_control", "b_Tead4_single", "c_Tead4_double_rank0", "Tead4_double_rank39"),each=3)
+foldchange_average=c(a=c(1,0,0),b=c(15.99326599,0,0),c=c(132.3232323,0,0),d=c(27.60942761,0,0))
+foldchange_rep=c(a=c(1,1,1),b=c(16.01689675,20.14382033,12.29094067), c=c(139.6569952,159.9661236, 105.7101804), d=c(34.01080908,29.48861879,18.12661508))
+
+df <- data.frame(motif_name, foldchange_average, foldchange_rep)
+
+p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
+    geom_bar(stat="identity",fill="lightblue")+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+
+#Run paired pairwise t-tests
+#kudos : https://www.datanovia.com/en/blog/how-to-perform-paired-pairwise-t-tests-in-r/
+library(rstatix)
+library(ggpubr)
+stat.test <- df %>%
+    pairwise_t_test(
+        foldchange_rep ~ motif_name, paired = FALSE,
+        p.adjust.method = "bonferroni"
+    )
+stat.test
+
+stat.test <- stat.test %>%
+    mutate(y.position = c(0.15,0.1,0.05,0,0.05,0))
+z <- p+stat_pvalue_manual(
+    stat.test,  label = "p.adj.signif", tip.length = 0,y.position = "y.position",step.increase = 0.18)
+
+ggsave("figures/9_tead4_double_motif_analysis/singletodouble_luciferase.pdf",z,height=5, width=8)
+
+```
+
+##get contribution logo for 38 and 21 patterns of tead double and tead single grouped motifs
+
+```{r}
+
+#get the pred dataframe
+td4_tdbl4_pred <- read_csv('/n/projects/kd2200/publication/bpnet/analysis/csv/preds_summary_affinity.csv')
+
+#subset task
+tead4_double <- dplyr::filter(td4_tdbl4_pred,motif=="Tead4-Tead4")
+
+#get the seqence dataframe
+tdbl4.df <- utils::read.table('/n/projects/kd2200/publication/bpnet/analysis/csv/tead4_tdbl_motif_instances_withseq.csv.gz', sep = "\t", header = TRUE)
+
+#subset
+tdbl <- tdbl4.df[tdbl4.df$sequence %in% tead4_double$sequence,]
+tdbl.gr <-  makeGRangesFromDataFrame(tdbl,keep.extra.columns = T, seqnames.field = "example_chrom",start.field =  "pattern_start_abs",end.field = "pattern_end_abs", starts.in.df.are.0based = T)
+
+# order regions
+tdbl.gr$signal <- regionSums(tdbl.gr,tsc.contrib.counts.bws$tead4)
+tdbl.gr <- tdbl.gr[order(tdbl.gr$signal,decreasing = T)]
+
+# save tsv and bed to use these regions to get contribution weight matrix using bpnet
+tdbl.df<-tdbl.gr %>% as.data.frame()
+readr::write_tsv(tdbl.df, 'tsv/tdbl_motifs_overlap_with_affinity_seq_1based.tsv.gz')
+rtracklayer::export(tdbl.gr %>% plyranges::mutate(name = paste0(example_interval_from_task,pattern_short, '_', row_idx)),
+                    'bed/tdbl_motifs_overlap_with_affinity_seq_0based.bed', format = 'BED')
+
+
+# plot cwm
+tead4_double_cwm <- read_tsv("tsv/tead4_double_motif_contrib_forpatterns.tsv")
+tead4_double_cwm <- as.matrix.data.frame(tead4_double_cwm)
+rownames(tead4_double_cwm)<-c('A','C','G','T')
+ggseqlogo(tead4_double_cwm, method='custom', seq_type='dna') + ylab('my custom height')
+
+
+##tead4 single
+
+td4_tdbl4_pred <- read_csv('/n/projects/kd2200/publication/bpnet/analysis/csv/preds_summary_affinity.csv')
+
+#subset task
+tead4_single <- dplyr::filter(td4_tdbl4_pred,motif=="Tead4")
+
+#get the seqence dataframe
+td4.df <- read.table('/n/projects/kd2200/publication/bpnet/analysis/csv/td4_motif_instances_withseq_test.gz', sep = "\t", header = TRUE)
+
+#subset
+td <- td4.df[td4.df$sequence %in% tead4_single$sequence,]
+td.gr <-  makeGRangesFromDataFrame(td,keep.extra.columns = T, seqnames.field = "example_chrom",start.field =  "pattern_start_abs",end.field = "pattern_end_abs", starts.in.df.are.0based = T)
+
+# order regions
+td.gr$signal <- regionSums(td.gr,tsc.contrib.counts.bws$tead4)
+td.gr <- td.gr[order(td.gr$signal,decreasing = T)]
+
+# save tsv and bed to use these regions to get contribution weight matrix using bpnet
+td.df<-td.gr %>% as.data.frame()
+readr::write_tsv(td.df, 'tsv/td4_single_motifs_overlap_with_affinity_seq_1based.tsv.gz')
+rtracklayer::export(tdbl.gr %>% plyranges::mutate(name = paste0(example_interval_from_task,pattern_short, '_', row_idx)), 
+                    'bed/td4_single_motifs_overlap_with_affinity_seq_0based.bed', format = 'BED')
+
+# plot cwm
+tead4_single_cwm <- read_tsv("tsv/tead4_single_motif_contrib_forpatterns.tsv")
+tead4_single_cwm <- as.matrix.data.frame(tead4_single_cwm)
+rownames(tead4_single_cwm)<-c('A','C','G','T')
+ggseqlogo(tead4_single_cwm, method='custom', seq_type='dna') + ylab('my custom height')
+```
+
+```{r, vmatch for tead motifs to calculate freq}
+
+tead4_freq <- DNAString("RMATTCCWD") %>% vmatchPattern(., BSgenome.Mmusculus.UCSC.mm10,max.mismatch =0 , fixed = "subject")
+tead4_freq <- keepStandardChromosomes(tead4_freq, pruning.mode = "coarse")
+
+# resizeng to 23 is as we add 6 'N' to get different spaced seq.
+m0p0_tead4_down.gr<- resize(tead4_freq, 23, "start")
+m0p0_tead4_up.gr<- resize(tead4_freq, 23, "end")
+m0p0_tead4_combine.gr <- c(m0p0_tead4_up.gr, m0p0_tead4_down.gr)
+m0p0_tead4_combine.gr <- unique(m0p0_tead4_combine.gr)
+m0p0_tead4_combine.gr$DNA <- getSeq(BSgenome.Mmusculus.UCSC.mm10,m0p0_tead4_combine.gr)
+
+m0 <- vcountPattern("RMATTCCRMATTCCNN", m0p0_tead4_combine.gr$DNA,fixed = "subject")
+m1 <- vcountPattern("RMATTCCNRMATTCCNN", m0p0_tead4_combine.gr$DNA,fixed = "subject")
+m2 <- vcountPattern("RMATTCCNNRMATTCCNN", m0p0_tead4_combine.gr$DNA,fixed = "subject")
+m3 <- vcountPattern("RMATTCCNNNRMATTCCNN", m0p0_tead4_combine.gr$DNA,fixed = "subject")
+m4 <- vcountPattern("RMATTCCNNNNRMATTCCNN", m0p0_tead4_combine.gr$DNA,fixed = "subject")
+m5 <- vcountPattern("RMATTCCNNNNNRMATTCCNN", m0p0_tead4_combine.gr$DNA,fixed = "subject")
+m6 <- vcountPattern("RMATTCCNNNNNNRMATTCCNN", m0p0_tead4_combine.gr$DNA,fixed = "subject")
+
+# overall frequeny of the pattern is similar if you vmatch how i did or vmatch  directly the spaced sequence
+m0 %>% table() # 491, regions when above space were used to vmatch mm10 bsgenome directly: 458
+m1 %>% table()# 750,regions when above space were used to vmatch mm10 bsgenome directly: 538
+m2 %>% table()# 744,regions when above space were used to vmatch mm10 bsgenome directly: 626
+m3 %>% table()# 601,regions when above space were used to vmatch mm10 bsgenome directly: 514
+m4 %>% table()# 1469,regions when above space were used to vmatch mm10 bsgenome directly: 1017
+m5 %>% table()# 764,regions when above space were used to vmatch mm10 bsgenome directly: 647
+m6 %>% table()# 1416,regions when above space were used to vmatch mm10 bsgenome directly: 1242
+
+# taking only the 1 mapped as it most freq.
+m0_p1 <- m0p0_tead4_combine.gr[m0==1]
+m0_p1$at_space <- "zero"
+m0_p1$pattern_short <- "m0_p0"
+m1_p1 <- m0p0_tead4_combine.gr[m1==1]
+m1_p1$at_space <- "one"
+m1_p1$pattern_short <- "m1_p0"
+m2_p1 <- m0p0_tead4_combine.gr[m2==1]
+m2_p1$at_space <- "two"
+m2_p1$pattern_short <- "m2_p0"
+m3_p1 <- m0p0_tead4_combine.gr[m3==1]
+m3_p1$at_space <- "three"
+m3_p1$pattern_short <- "m3_p0"
+m4_p1 <- m0p0_tead4_combine.gr[m4==1]
+m4_p1$at_space <- "four"
+m4_p1$pattern_short <- "m4_p0"
+m5_p1 <- m0p0_tead4_combine.gr[m5==1]
+m5_p1$at_space <- "five"
+m5_p1$pattern_short <- "m5_p0"
+m6_p1 <- m0p0_tead4_combine.gr[m6==1]
+m6_p1$at_space <- "six"
+m6_p1$pattern_short <- "m6_p0"
+
+combine_double_motifs_diffspacing.gr <- c(m0_p1,m1_p1,m2_p1,m3_p1,m4_p1,m5_p1,m6_p1)
+tdbl.df<-combine_double_motifs_diffspacing.gr %>% as.data.frame()
+readr::write_tsv(tdbl.df, 'tsv/combine_double_motifs_diffspacing.tsv.gz')
+rtracklayer::export(combine_double_motifs_diffspacing.gr, 'bed/combine_double_motifs_diffspacing_0based.bed', format = 'BED')
+
+#saving each spacing individually for pred in 10_tead4_double_pred_dif_spacing.ipynb
+readr::write_tsv(as.data.frame(m0_p1), 'tsv/zero_double_motifs_spacing.tsv.gz')
+readr::write_tsv(as.data.frame(m1_p1), 'tsv/one_double_motifs_spacing.tsv.gz')
+readr::write_tsv(as.data.frame(m2_p1), 'tsv/two_double_motifs_spacing.tsv.gz')
+readr::write_tsv(as.data.frame(m3_p1), 'tsv/three_double_motifs_spacing.tsv.gz')
+readr::write_tsv(as.data.frame(m4_p1), 'tsv/four_double_motifs_spacing.tsv.gz')
+readr::write_tsv(as.data.frame(m5_p1), 'tsv/five_double_motifs_spacing.tsv.gz')
+readr::write_tsv(as.data.frame(m6_p1), 'tsv/six_double_motifs_spacing.tsv.gz')
+
+
+#plot (bpnet pred values are from 10_tead4_double_pred_dif_spacing.ipynb)
+at_spacer <- c("a_tandem","b_+1","c_optimal_spacing","d_+3","e+4","f+5","g+6")
+pred_values <- c(5.814025,9.155832,22.75915,8.368184,9.310171,7.212682,6.170466)
+df <- data.frame(at_spacer,pred_values)
+ggplot(data=df, aes(x=at_spacer, y=pred_values)) +
+  geom_bar(stat="identity",fill="#922B21",width=0.7)+theme_classic()+ylab(paste("Average predicted signal at genomic regions"))+xlab("spaces between two Tead4 motifs")
+
+
+```
+
+
+# Observed and Predicted Tead4 ChIP in ESC and TSC
+```{r}
+
+# import cwm mapped regions
+tead4_double_tsc <- read_tsv('/n//projects/kd2200/publication/bpnet/modisco/profile/dataspec.yaml_default_fold_5/tead4/motif-instances-all-regions.tsv.gz')
+
+tead4_double_esc <- read_tsv('/n//projects/kd2200/publication/bpnet/bpnet_single_tead4_esc/tead4_esc/modisco/profile/dataspec.yaml_default/tead4_esc/motif-instances-all-regions.tsv.gz')
+
+# make grnage
+tead4_double_tsc.gr <- makeGRangesFromDataFrame(tead4_double_tsc,starts.in.df.are.0based = T , keep.extra.columns = T, seqnames.field = "example_chrom",start.field =  "pattern_start_abs",end.field =  "pattern_end_abs")
+
+tead4_double_esc.gr <- makeGRangesFromDataFrame(tead4_double_esc, starts.in.df.are.0based = T, keep.extra.columns = T, seqnames.field = "example_chrom",start.field =  "pattern_start_abs",end.field =  "pattern_end_abs")
+
+# subset Tead double motif
+tead4_double_tsc_sub.gr <- subset(tead4_double_tsc.gr, pattern_short=="m0_p1")
+tead4_double_esc_sub.gr <- subset(tead4_double_esc.gr, pattern_short=="m0_p2")
+
+# remove ERVs
+rm <- readRDS("/n/projects/mw2098/genomes/mm10/repeatmasker.mm10.gr.rds")
+erv <- rm[grep("ERV", rm$repeat_class)]
+
+tead4_double_tsc_sub.gr<- tead4_double_tsc_sub.gr[which(!overlapsAny(tead4_double_tsc_sub.gr, erv, ignore.strand=T))]
+tead4_double_esc_sub.gr<- tead4_double_esc_sub.gr[which(!overlapsAny(tead4_double_esc_sub.gr, erv, ignore.strand=T))]
+
+# remove promoters
+mm10_promoters <-promoters(TxDb.Mmusculus.UCSC.mm10.knownGene,upstream=1000, downstream=500)
+tead4_double_tsc_sub_no_promoter.gr <- tead4_double_tsc_sub.gr[which(!overlapsAny(tead4_double_tsc_sub.gr,mm10_promoters, ignore.strand=T))]
+tead4_double_esc_sub_no_promoter.gr <- tead4_double_esc_sub.gr[which(!overlapsAny(tead4_double_esc_sub.gr,mm10_promoters, ignore.strand=T))]
+
+tead_double_motifs_esc_tsc.list <- list(tead4_tsc= tead4_double_tsc_sub_no_promoter.gr, tead4_esc=tead4_double_esc_sub_no_promoter.gr)
+  
+obs_tead_bw <- list(
+  tead4_a_tsc=list(pos="/n//projects/kd2200/publication/bpnet_prep/bw/normalized/mtsc_tead4_nexus_filtered_combined_normalized_positive.bw",
+                   neg="/n//projects/kd2200/publication/bpnet_prep/bw/normalized/mtsc_tead4_nexus_filtered_combined_normalized_negative.bw"),
+  tead4_b_esc=list(pos="/n//projects/kd2200/publication/data_preparation/bw/mm10/nexus/combined/mesc_tead4_nexus_combined_normalized_positive.bw",
+                  neg="/n//projects/kd2200/publication/data_preparation/bw/mm10/nexus/combined/mesc_tead4_nexus_combined_normalized_negative.bw"))
+
+pred_tead_bw <- list(tead4_a_tsc=list(pos="/n//projects/kd2200/publication/bpnet/pred_contrib_bws/tead4.preds.pos.bw",
+neg="/n//projects/kd2200/publication/bpnet/pred_contrib_bws/tead4.preds.neg.bw"),
+tead4_b_esc=list(pos="/n//projects/kd2200/publication/bpnet/pred_contrib_bws/tead4_esc/fold_1/tead4_esc.preds.pos.bw",
+neg="/n//projects/kd2200/publication/bpnet/pred_contrib_bws/tead4_esc/fold_1/tead4_esc.preds.neg.bw"))
+
+##plot function
+plot_exo_metapeak<- function(metapeak, pos.col, neg.col, name = name, xlab = xlab, ylab = ylab, ncol = NA){
+    x <- ggplot(metapeak, aes(x=tss_distance, y=reads, fill=strand)) +
+        geom_area(position="identity") +
+        scale_fill_manual(values=c(pos.col, neg.col)) +
+        ggtitle(name) +
+        facet_wrap(~bw_name, scales = "fixed", ncol = ncol) +
+        theme(legend.position = "none") +
+        theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+              panel.background = element_blank(), axis.line.x = element_line(colour = "black"),
+              axis.line.y = element_line(colour = "black")) +
+        xlab(xlab) + ylab(ylab)
+    
+    x
+}
+
+
+# calculate and plot
+tead4_metapeak.df <- get_multi_gr_bw_exo_metapeak(gr.list = tead_double_motifs_esc_tsc.list, bw.list = obs_tead_bw, upstream = 100, downstream = 100)
+plot <- plot_exo_metapeak(tead4_metapeak.df, "#c6cf57", "#838f04", name = "TEAD4 binding at Tead double motifs", xlab = "Distance from motif center (bp)", ylab = "reads", ncol = 2)
+
+ggsave("figures/9_tead4_double_motif_analysis/tead4_binding_at_doublemotifs_esc_tsc.pdf",plot,height=4, width=6)
+
+
+# pred
+tead4_metapeak.df <- get_multi_gr_bw_exo_metapeak(gr.list = tead_double_motifs_esc_tsc.list, bw.list = pred_tead_bw, upstream = 100, downstream = 100)
+
+plot <- plot_exo_metapeak(tead4_metapeak.df, "#d9b24a", "#a67b07", name = "TEAD4 binding at Tead double motifs", xlab = "Distance from motif center (bp)", ylab = "reads", ncol = 2)
+
+ggsave("figures/9_tead4_double_motif_analysis/pred_tead4_binding_at_doublemotifs_esc_tsc.pdf",plot,height=4, width=6)
+
+```
+
+
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+# Session Information
+
+For the purposes of reproducibility, the R/Bioconductor session information is printed below:
+
+```{r sessioninfo}
+sessionInfo()
+```
