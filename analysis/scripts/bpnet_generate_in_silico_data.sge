@@ -1,0 +1,14 @@
+#$ -cwd
+#$ -S /bin/bash
+#$ -N generate_in_silico_data
+#$ -pe smp 80
+#$ -l h_vmem=2G
+#$ -l h_rt=24:00:00
+#$ -p -10
+#$ -V
+
+cd /n/projects/kd2200/analysis/BPNet/cegkttyz_tsc_bpnet/grid_search/final_cttgy_tsc_model/bpnet/analysis/files/
+
+conda activate bpnet-gpu
+
+./scripts/py/bpnet_generate_in_silico_data.py
