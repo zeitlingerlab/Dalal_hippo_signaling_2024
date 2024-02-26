@@ -1,8 +1,8 @@
 ---
 Date: Feb 2024
 Purpose: Give setup directions for Hippo signaling paper
-Thanks, and Kudos to Melanie Weilert for many scripts!
 ---
+Thanks, and Kudos to Melanie Weilert for many scripts!
 
 # Introduction
 
