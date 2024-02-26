@@ -1,0 +1,101 @@
+---
+title: "sv40 analysis"
+author: "Khyati Dalal"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    depth: 3
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{1028-02098-001-001}
+- \fancyfoot[LE,RO]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+editor_options:
+  chunk_output_type: console
+---
+
+# Introduction
+
+The goal of this analysis is to embed sv40 enhancer regions below from (https://www.sciencedirect.com/science/article/pii/S0021925819871569#bib14) [ACCAGCTGTGGAATGTGTGTCAGTTAGGGTGTGGAAAGTCCCCAGGCTCCCCAGTAGGCAGAAGTATGCAAAGCATGCATCTCAATTAGTCAGCAACCAG]
+
+![sv40 enhancer regions](/n/projects/kd2200/publication/bpnet/analysis/figures/12_sv40/Picture1.jpg)
+
+# Computational Setup
+
+```{r setup, warning=F, message=F}
+#Standard packages
+library(rtracklayer) ; library(GenomicRanges); library(magrittr) ; library(Biostrings);library(parallel)
+library(ggplot2) ; library(reshape2); library(plyranges); library(Rsamtools);library(BSgenome.Mmusculus.UCSC.mm10)
+library(dplyr); library(data.table); library(patchwork); library(readr);library(tidyverse);library(forcats); library(testit);library("TxDb.Mmusculus.UCSC.mm10.knownGene"); library(viridis);library(DECIPHER)
+
+#KNITR Options
+setwd("/n/projects/kd2200/publication/bpnet/analysis/")
+options(knitr.figure_dir="figures/12_sv40/", java.parameters = "- Xmx6g")
+
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/granges_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/load_motif_instance_from_all_regions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/caching.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/multiplot.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/knitr_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/motif_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/heatmap_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/1.motif_summary/tsc_variables.R")
+```
+
+
+
+
+# import prediction files and plot the tead4 profile
+```{r}
+
+sv40_pred.df <- readr::read_csv('/n/projects/kd2200/publication/bpnet/analysis/csv/sv40/predictions_sv40_full.csv')
+motifs.df <- readr::read_csv('/n/projects/kd2200/publication/bpnet/analysis/csv/sv40/sv40_motif_coordinates.csv')
+sv40_pred_td.df <- sv40_pred.df %>% dplyr::filter(task=="tead4")
+
+summary_sv40 <- sv40_pred_td.df %>% dplyr::group_by(position, task,strand) %>% dplyr::summarise(mean_pred= mean(prediction))
+
+g <- ggplot()
+
+for(row in 1:nrow(motifs.df)){
+  g<-g + annotate("rect", xmin = motifs.df$start[row], xmax = motifs.df$end[row],
+                  ymin = -Inf, ymax = Inf, alpha = .2)
+  g<-g + annotate("text", x = motifs.df$start[row], label = motifs.df$name[row], y = Inf, vjust = 1.5)
+}
+
+g<- g+ geom_area(data = summary_sv40, mapping = aes(position, mean_pred, group = strand,fill = task), alpha = .7)+
+  geom_line(data =summary_sv40, mapping = aes(position, mean_pred, group = strand,color = task))+                  
+  
+  facet_grid(task ~ ., scales = "fixed")+
+  scale_x_continuous(limits = c(450,650),
+                     name = "Position (bp)")+
+  scale_y_continuous(name = "BPNet predictions")+
+  scale_fill_manual(values = c('#6e828e', '#7f778c', '#b47382','#788e6e', '#968b71', '#96718f'), name = "WT")+
+  theme_classic()+ggtitle("can_sv40")
+g
+
+```
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+# Session Information
+
+For the purposes of reproducibility, the R/Bioconductor session information is printed below:
+
+```{r sessioninfo}
+sessionInfo()
+```
