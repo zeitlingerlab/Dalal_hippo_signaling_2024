@@ -1,0 +1,12 @@
+#Setup
+working_directory: "/n/projects/kd2200/analysis/BPNet/cegkttyz_tsc_bpnet/grid_search/final_cttgy_tsc_model/"
+blacklistFile: "/n/projects/mw2098/genomes/mm10/mm10.blacklist.bed"
+chrom_sizes: "/n/projects/mw2098/genomes/mm10/mm10.chrom.sizes.txt"
+#MACS2 parameters
+macs2_qval: 0.05 #cutoff qvalue for keeping peaks
+
+#idr_to_bed_genome:
+BSgenome: "BSgenome.Mmusculus.UCSC.mm10"
+
+
+special_directory: "/n/projects/kd2200/analysis/BPNet/cegkttyz_tsc_bpnet/grid_search/final_cttgy_tsc_model/idr/"

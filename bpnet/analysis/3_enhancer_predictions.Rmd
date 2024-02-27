@@ -1,0 +1,290 @@
+---
+title: 'Predictions of enhancers using TSC model'
+author: "Khyati Dalal"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    depth: 3
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{1028-02098-001-001}
+- \fancyfoot[LE,RO]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+editor_options:
+  chunk_output_type: console
+---
+
+# Introduction
+
+The goal of this analysis is to use the actual binding, predicted binding, and contribution tracks of the `tsc` model across enhancers to validate and assess the TF behavior at these well-annotated sites.
+
+# Computational Setup
+
+```{r, warning=F, message=F}
+#Standard packages
+library(rtracklayer) ; library(GenomicRanges); library(magrittr) ; library(Biostrings);library(parallel)
+library(ggplot2) ; library(reshape2); library(plyranges); library(Rsamtools);library(BSgenome.Mmusculus.UCSC.mm10)
+library(dplyr); library(data.table); library(patchwork); library(readr); library(testit)
+
+#KNITR Options
+setwd("/n/projects/kd2200/publication/bpnet/analysis/")
+options(knitr.figure_dir="figures/3_enhancer_predictions", java.parameters = "- Xmx6g")
+
+#Lab sources
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/granges_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/caching.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/multiplot.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/knitr_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/motif_functions.R")
+
+#Specific sources
+library(ggseqlogo)
+library(stringr)
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/1.motif_summary/tsc_variables.R")
+
+#Pre-existing variables
+enhancer.csv <- read_csv("csv/tsc_enhancer_list_forr.csv")
+
+
+```
+
+# Import motifs of interest
+
+```{r import_motifs}
+motifs_tsc.gr<-readr::read_tsv('tsv/curated_motif_regoion_tsc_model_motifs_fold5_1based.tsv.gz') %>% GenomicRanges::makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based = F)
+```
+
+# Import enhancers of interest
+
+```{r import_enhancers}
+#enhancers.gr<-rtracklayer::import(enhancers.path)
+enhancers_tsc.gr <- enhancer.csv %>% makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based = F, seqnames.field = "chr",start.field = "start", end.field = "end")
+enhancers_tsc.gr <- enhancers_tsc.gr %>% dplyr::select(target_gene_name)
+enhancers_tsc.gr <- enhancers_tsc.gr %>% dplyr::mutate(name=target_gene_name)
+enhancers_tsc.gr <- enhancers_tsc.gr %>% dplyr::select(name)
+enhancers_tsc.gr$score <- 0
+```
+
+# Plot enhancers of interest
+
+## Function to plot single enhancer region
+
++ Inputs
+  + enhancers.gr: GRanges with enhancer coordinates
+  + pred.bw.list: list of predicted ChIP-nexus bigwigs
+  + actual.bw.list: list of actual ChIP-nexus bigwigs
+  + contrib.bw.list: list of contribution bigwigs
+  + motifs.gr: GRanges of motifs derived from `bpnet cwm-scan` 
+  + task_colors: vector of colors corresponding to `tasks` below
+  + tasks: tasks to find coverage across, must be same order as `task_colors`
+  + output_dir: directory to write files to
+  + output_suffix: suffix that defines plot type...can be a comma-separated string for multiple types
+  + yaxis_contrib_threshold: quantile to plot y-axis of contribution if enhancer contribution is too low
+  + upstream = width of window upstream of enhancer center
+  + downstream = width of window downstream of enhancer center
+  + bsgenome: bsGenome object to extract sequences from
+  + threads: number of workers when generating coverage dfs
++ Output: plot list of each enhancer predictions, coverage, and contribution. If motifs overlap, they will be marked.
+
+```{r}
+plot_enhancer_nexus_preds<-function(enhancers.gr, pred.bw.list, actual.bw.list, contrib.bw.list,
+                                    motifs.gr, task_colors, tasks, output_dir, output_suffix = '.pdf', yaxis_contrib_threshold = .25,
+                                    upstream = 100, downstream = 101, bsgenome = BSgenome.Dmelanogaster.UCSC.dm6, threads = 6, height = 8, width = 20){
+  #Format enhancers
+  enhancers.gr$enhancer_id<-1:length(enhancers.gr)
+  enhancers_centered.gr<-resize(enhancers.gr, 1, 'center')
+  enhancers_resized.gr<-enhancers_centered.gr %>% resize(., downstream, 'start') %>% resize(., upstream + width(.), 'end')  
+  
+  #Get data across enhancers
+  task.data.list<-mclapply(tasks, function(x){
+    
+    #Get prediction and contribution scores
+    pred.mat.list<-exo_metapeak_matrix(regions.gr = enhancers_centered.gr, sample = pred.bw.list[[x]], upstream = upstream, downstream = downstream)
+    preds.df<-lapply(names(pred.mat.list), function(y){
+      pred.mat<-pred.mat.list[[y]]
+      colnames(pred.mat)<-(-1 * upstream):(downstream - 1)
+      df<-pred.mat %>% data.table() %>% 
+        dplyr::mutate(enhancer_id = 1:nrow(.)) %>% 
+        melt.data.table(id.vars = 'enhancer_id', variable.name = 'tss_distance', value.name = 'reads') %>% 
+        dplyr::mutate(strand = y, type = 'pred')
+      return(df)
+    }) %>% rbindlist
+    preds.df$reads[preds.df$strand=='neg']<-preds.df$reads[preds.df$strand=='neg']*-1
+    
+    actual.mat.list<-exo_metapeak_matrix(regions.gr = enhancers_centered.gr, sample = actual.bw.list[[x]], upstream = upstream, downstream = downstream)
+    actual.df<-lapply(names(actual.mat.list), function(y){
+      actual.mat<-actual.mat.list[[y]]
+      colnames(actual.mat)<-(-1 * upstream):(downstream - 1)
+      df<-actual.mat %>% data.table() %>% 
+        dplyr::mutate(enhancer_id = 1:nrow(.)) %>% 
+        melt.data.table(id.vars = 'enhancer_id', variable.name = 'tss_distance', value.name = 'reads') %>% 
+        dplyr::mutate(strand = y, type = 'obs')
+      return(df)
+    }) %>% rbindlist
+    actual.df$reads[actual.df$strand=='neg']<-actual.df$reads[actual.df$strand=='neg']*-1
+    
+    #Get contribution scores in a matrix format.
+    contrib.mat<-standard_metapeak_matrix(regions.gr = enhancers_centered.gr, sample = contrib.bw.list[[x]], upstream = upstream, downstream = downstream)
+    
+    return(list(preds = preds.df, actual = actual.df, contrib=contrib.mat))
+  }, mc.cores = threads)
+  names(task.data.list)<-tasks
+  
+  enhancer.plot.list<-lapply(1:length(enhancers.gr), function(y){
+    enhancer.gr<-enhancers.gr %>% plyranges::filter(enhancer_id == y)
+    enhancer_centered.gr<-enhancers_centered.gr %>% plyranges::filter(enhancer_id == y)
+    enhancer_resized.gr<-enhancers_resized.gr %>% plyranges::filter(enhancer_id == y)
+    testit::assert('GRanges does not have unique enhancer id.', length(enhancer.gr)==1)
+    
+    task.plot.list<-mclapply(tasks, function(x){
+      #Get prediction and contribution scores
+      pred.df<-task.data.list[[x]]$preds %>% dplyr::filter(enhancer_id == y) %>%
+        dplyr::mutate(tss_distance = as.numeric(tss_distance)) %>% 
+        dplyr::mutate(genomic_position = tss_distance + start(enhancer_centered.gr), type = 'pred')
+      actual.df<-task.data.list[[x]]$actual %>% dplyr::filter(enhancer_id == y) %>%
+        dplyr::mutate(tss_distance = as.numeric(tss_distance)) %>% 
+        dplyr::mutate(genomic_position = tss_distance + start(enhancer_centered.gr), type = 'obs')
+      
+      #Get contribution scores in a matrix format.
+      contrib.mat<-task.data.list[[x]]$contrib[y,] %>% as.numeric()
+      seq<-getSeq(bsgenome, enhancer_resized.gr, as.character = T)
+      seq_1he<-one_hot_encode_DNA(seq)
+      colnames(seq_1he) <- NULL
+      seq_1he[which(seq_1he==1)] <- contrib.mat
+      colnames(seq_1he) <- min(actual.df$tss_distance):max(actual.df$tss_distance) + start(enhancer_centered.gr)
+      contrib_1he<-seq_1he
+      
+      if(sum(contrib_1he)==0){
+        return(ggplot())
+      }else{
+        #Compute local y-axis for contribution
+        
+        #If the max of the contribution scores is less than the smallest threshold (grouped by motifs associated with this task), then set y-axis manually.
+        yaxis_manual<-motifs.gr %>% as.data.frame %>% 
+          dplyr::filter(modisco_task==x) %>% 
+          dplyr::group_by(pattern_name) %>% 
+          dplyr::summarize(thresh = quantile(contrib_max, yaxis_contrib_threshold)) %>% 
+          .$thresh %>% min(.)
+        if((max(contrib_1he)<=(yaxis_manual)) & (x != 'Hb')){
+          ylimits = c(min(contrib_1he), yaxis_manual)
+        } else{
+          ylimits = c(min(contrib_1he), max(contrib_1he))
+        }
+        
+        #Compute overlaps with curated motifs
+        motif_subset.df<-subsetByOverlaps(motifs.gr, enhancer_resized.gr, ignore.strand = T, type = 'within') %>% as.data.frame()
+        if(nrow(motif_subset.df)==0){
+          contrib.plot<-ggplot()
+        }else{
+          motif_subset.df$enhancer_window_motif_start<-motif_subset.df$start - start(enhancer_resized.gr)
+          motif_subset.df$enhancer_window_motif_end<-motif_subset.df$end - start(enhancer_resized.gr)
+          motif_subset.df$enhancer_window_motif_center<-(motif_subset.df$enhancer_window_motif_end-motif_subset.df$enhancer_window_motif_start)/2 + 
+            motif_subset.df$enhancer_window_motif_start
+          motif_subset.df$modisco_task<-factor(motif_subset.df$modisco_task, levels = tsc.tasks)
+          
+          contrib.plot<-ggplot() +
+            geom_rect(data = motif_subset.df, aes(xmin = enhancer_window_motif_start, xmax = enhancer_window_motif_end, 
+                                                  ymin = -Inf, ymax = Inf), 
+                      alpha = .1)+
+            geom_text(data = motif_subset.df, aes(x = enhancer_window_motif_center, y = Inf, label = pattern_name), vjust = 1, size = 1)
+        }
+        
+        contrib.plot<-contrib.plot + 
+          geom_logo(contrib_1he, method = 'custom')+
+          scale_y_continuous(limits = ylimits, name = 'contrib')+
+          ggtitle(paste0(x, ' contribution'))+
+          theme_classic() + theme(strip.background = element_blank(), strip.text = element_blank(), 
+                                  axis.text.x = element_blank(), axis.line.x = element_blank(), 
+                                  axis.title.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = margin(0,0,0,0, "cm"))    
+        
+        pred.plot<-ggplot(pred.df, aes(genomic_position, reads))+
+          geom_line(aes(group = strand), colour = task_colors[x],size=1.3)+
+          #geom_area(aes(group = strand), fill = task_colors[x])+
+          facet_grid(type ~ ., scales = 'free') +
+          scale_y_continuous(name = 'pred')+
+          ggtitle(paste0(x, ' predicted'))+
+          theme_classic() + theme(strip.background = element_blank(), strip.text = element_blank(), 
+                                  axis.text.x = element_blank(), axis.line.x = element_blank(), 
+                                  axis.title.x = element_blank(), axis.ticks.x = element_blank(), plot.margin = margin(0,0,0,0, "cm"))
+        
+        obs.plot<-ggplot(actual.df, aes(genomic_position, reads))+
+          geom_line(aes(group = strand), colour = task_colors[x],size=1.3)+
+         # geom_area(aes(group = strand), fill = task_colors[x])+
+          facet_grid(type ~ ., scales = 'free') +
+          scale_y_continuous(name = 'RPM')+
+          scale_x_continuous(name = paste0('genomic position on ', seqnames(enhancer.gr),' (bp)'))+
+          ggtitle(paste0(x, ' observed'))+
+          theme_classic() + theme(strip.background = element_blank(), strip.text = element_blank(), plot.margin = margin(0,0,0,0, "cm"))
+        
+        g<- obs.plot +pred.plot + contrib.plot + plot_layout(ncol = 1, heights = c(1,1,1))
+        return(g)
+      }
+    }, mc.cores = threads) 
+    
+    enhancer.plot<-patchwork::wrap_plots(task.plot.list, ncol = 1) + patchwork::plot_annotation(title = enhancer.gr$name)
+    filler<-lapply(str_split(string = output_suffix, pattern = ',') %>% unlist, function(plot_suffix){
+      ggsave(paste0(output_dir, enhancer.gr$name, plot_suffix), enhancer.plot, width = width, height = height)
+    })
+    return(NULL)
+  })
+  return(NULL)
+}
+```
+
+## Note on contribution plots
+
+Please note that each of the y-axes for the observed, predicted, and contribution scores is largely uncontrolled between tasks and enhancers. This is done in order to create a clear plot that allows the comparison of obs vs predicted (not necessarily to compare between tasks or compare between enhancers). However, the axis of the contribution scores can be particularly misleading, with low amplitude distributions of contribution seeming to be more important than they are relative to a global population of mapped motifs. In order to correct for this, we plot the contributions relative to either their true maximum across the window OR the .25% percentile of maximum contributions across mapped motifs of interest specific to that TF-MoDISco task track (or other selectable threshold)--whichever is the higher value. This allows perspective surrounding the motif contribution scores.
+
+Here, we want to plot the contribution maximum value ranges across all motifs in order to provide reference and perspective when viewing the plots below.
+
+```{r}
+motifs_tsc.gr %>% as.data.frame %>% group_by(pattern_name) %>% dplyr::summarize(min = min(contrib_max),
+                                                                            q25 = quantile(contrib_max, .25),
+                                                                            median = median(contrib_max),
+                                                                            q75 = quantile(contrib_max, .75),
+                                                                            max = max(contrib_max))
+```
+
+# Plot predictions, coverage, and contribution across enhancers
+
+```{r, eval=TRUE}
+#Extract enhancer plots
+enhancer.plot.list<-plot_enhancer_nexus_preds(enhancers.gr = enhancers_tsc.gr, yaxis_contrib_threshold = 0.25,
+                                               pred.bw.list = tsc.pred.bws, actual.bw.list = tsc.actual.bws, 
+                                               contrib.bw.list = tsc.contrib.profile.bws, motifs.gr = motifs_tsc.gr, 
+                                               output_dir = 'figures/3_enhancer_predictions/', output_suffix = '.pdf,.png',
+                                               task_colors = tsc.color.vec, tasks = tsc.tasks, bsgenome = BSgenome.Mmusculus.UCSC.mm10,
+                                               height = 8*length(tsc.tasks), width = 20,
+                                               upstream = 200, downstream = 251, threads = 8)
+```
+
+# Session Information
+
+For the purposes of reproducibility, the R/Bioconductor session information is printed below:
+
+```{r sessioninfo}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,192 @@
+"""
+Author: Khyati Dalal [from Melanie]
+Affiliation: Stowers Institute
+Aim: BPNet data processing workflow for trophoblast model
+Date: Jan 14th 2022
+Run: snakemake
+
+Main target rules:
+------------------
+- filter_nexus_bam: deduplicate BAM files
+- merge_bam: convert ChIP-nexus GRanges files to bigwig files
+
+- run_nexus_macs2_combined: run MACS2 on merged ChIP-nexus BAM files
+- run_nexus_macs2_individual: run MACS2 on filtered ChIP-nexus BAM files
+- run_pairwise_IDR: run unique, pairwise combinations of idr between replicates and return best combinations
+- idr_to_bed: convert IDR to bed file of regions, remove non-standard chroms, check chromosome boundaries, blacklist
+
+- combined_bed: TODO (combine bed file to reduce granges)
+- bam_to_granges: convert deduplicated and merged BAM files to GRanges RDS files
+- granges_to_bw: convert ChIP-nexus GRanges files to bigwig files
+
+
+Notable:
+------------------
+- Use uneven combinations (must explicity list combinations).
+- Create partial expansions of wildcard variables (e.g. samtools merge)
+- Create partial expansions WHILE accounting for uneven combinations
+"""
+
+#Setup
+import csv
+import os
+from itertools import product
+configfile: "specs/config.yaml"
+
+#Collect sample names in combination
+FACTORS=["tead4","cdx2", "yap1","tfap2c", "gata3", "polii"]
+REPS=[1, 2, 3, 4, 5, 6,7] #TFs have up to 6 replicates
+
+#Filter out missing replicates when conducting an expansion
+def filter_combinator(combinator, blacklist):
+    def filtered_combinator(*args, **kwargs):
+        for wc_comb in combinator(*args, **kwargs):
+            # Use frozenset instead of tuple
+            # in order to accomodate
+            # unpredictable wildcard order
+            if frozenset(wc_comb) not in blacklist:
+                yield wc_comb
+    return filtered_combinator
+
+forbidden = {
+    frozenset({("factor", "tfap2c"), ("rep", 1)}),
+    frozenset({("factor", "tfap2c"), ("rep", 2)}),
+    frozenset({("factor", "tfap2c"), ("rep", 3)}),
+    frozenset({("factor", "yap1"), ("rep", 3)}),
+    frozenset({("factor", "yap1"), ("rep", 7)}),
+    frozenset({("factor", "tead4"), ("rep", 4)}),
+    frozenset({("factor", "tead4"), ("rep", 5)}),
+    frozenset({("factor", "tead4"), ("rep", 6)}),
+    frozenset({("factor", "tead4"), ("rep", 7)}),
+    frozenset({("factor", "cdx2"), ("rep", 1)}),
+    frozenset({("factor", "cdx2"), ("rep", 3)}),
+    frozenset({("factor", "cdx2"), ("rep", 4)}),
+    frozenset({("factor", "gata3"), ("rep", 4)}),
+    frozenset({("factor", "gata3"), ("rep", 5)}),
+    frozenset({("factor", "gata3"), ("rep", 6)}),
+    frozenset({("factor", "gata3"), ("rep", 7)}),
+    frozenset({("factor", "polii"), ("rep", 6)}),
+    frozenset({("factor", "polii"), ("rep", 7)}),
+    }
+filtered_samples = filter_combinator(product, forbidden)
+
+#Create output rules for make file DAG
+rule all:
+    input:
+       expand("bam/filtered/mtsc_{factor}_nexus_{rep}_filtered.bam", filtered_samples, factor=FACTORS, rep=REPS),
+       expand("bam/combined/mtsc_{factor}_nexus_filtered_combined.bam", factor=FACTORS),
+       expand("rdata/nexus/mtsc_{factor}_nexus_filtered_combined_positive.bw", factor=FACTORS),
+       expand("bw/normalized/mtsc_{factor}_nexus_filtered_combined_normalized_positive.bw", factor=FACTORS),
+       expand("macs2/combined/mtsc_{factor}_nexus_peaks.narrowPeak", factor=FACTORS),
+       expand("macs2/individual/mtsc_{factor}_nexus_{rep}_peaks.narrowPeak", filtered_samples, factor=FACTORS, rep=REPS),
+       expand("idr/optimal/mtsc_{factor}_nexus_idr_peaks.txt", factor=FACTORS),
+       expand("bed/peaks/mtsc_{factor}_nexus_idr_peaks.bed", factor=FACTORS),
+       #expand("bed/combined/mtsc_{factor}_nexus_idr_combined_peaks.bed", factor=FACTORS)
+
+# Filter .bam files
+rule filter_nexus_bam:
+    input:
+        "bam/raw/mtsc_{factor}_nexus_{rep}.bam"
+    output:
+        "bam/filtered/mtsc_{factor}_nexus_{rep}_filtered.bam"
+    message: "Deduplicating BAM files..."
+    shell:
+        "Rscript /l/Zeitlinger/ZeitlingerLab/data/thenexus_pipeline/scripts/chipnexus_pipeline/filter_bam.r -f {input} -o {output}"
+
+#Merge BAM files using samtools
+rule merge_bam:
+     input:
+        #expand("bam/filtered/mesc_{{factor}}_nexus_{rep}_filtered.bam", filtered_samples, rep=REPS) #if you did not have combinations that are missing
+        lambda wildcards: expand("bam/filtered/mtsc_{factor}_nexus_{rep}_filtered.bam", filtered_samples, factor=wildcards.factor, rep=REPS)
+     output:
+         "bam/combined/mtsc_{factor}_nexus_filtered_combined.bam"
+     message: "Merging BAM files..."
+     shell:
+         "samtools merge {output} {input}"
+
+
+#Convert BAM to rdata
+rule bam_to_granges:
+    input:
+        "bam/combined/mtsc_{factor}_nexus_filtered_combined.bam"
+    output:
+        "rdata/nexus/mtsc_{factor}_nexus_filtered_combined.granges.rds"
+    params:
+        name = "rdata/nexus/mtsc_{factor}_nexus_filtered_combined"
+    message: "Converting BAM to GRanges..."
+    shell:
+        "Rscript /l/Zeitlinger/ZeitlingerLab/data/thenexus_pipeline/scripts/chipnexus_pipeline/process_bam.r -f {input} -n {params.name} -u FALSE"
+
+#Convert rdata to bw
+rule granges_to_bw:
+    input:
+        "rdata/nexus/mtsc_{factor}_nexus_filtered_combined.granges.rds"
+    output:
+        "rdata/nexus/mtsc_{factor}_nexus_filtered_combined_positive.bw"
+    params:
+        #fac = "{factor}"
+    message: "Converting GRanges to bw..."
+    run:
+        shell("Rscript /l/Zeitlinger/ZeitlingerLab/data/thenexus_pipeline/scripts/chipnexus_pipeline/split_granges_by_strand.r -r {input}")
+        #shell("mv rdata/nexus/*.bw bw/ -v")
+
+rule normalize_bw:
+    input:
+        "rdata/nexus/mtsc_{factor}_nexus_filtered_combined.granges.rds"
+    output:
+        "bw/normalized/mtsc_{factor}_nexus_filtered_combined_normalized_positive.bw"
+    params:
+        name = "bw/normalized/mtsc_{factor}_nexus_filtered_combined_normalized"
+    message: "Normalizing ChIP-nexus data..."
+    shell:
+        "Rscript /l/Zeitlinger/ZeitlingerLab/data/thenexus_pipeline/scripts/r/generating_normalized_tracks_from_gr.r -f {input} -n {params.name}"
+
+#Run MACS2 on .bam files
+rule run_nexus_macs2_combined:
+     input:
+         "bam/combined/mtsc_{factor}_nexus_filtered_combined.bam"
+     output:
+         "macs2/combined/mtsc_{factor}_nexus_peaks.narrowPeak"
+     params:
+         name = "mtsc_{factor}_nexus",
+         outdir = "macs2/combined"
+     message: "Running MACS2 on merged BAM files..."
+     shell:
+         " macs2 callpeak -t {input} --tempdir tmp --qvalue {config[macs2_qval]} --nomodel --shift -75 --extsize 150 --keep-dup all -g mm -f BAM --outdir {params.outdir} -n {params.name}" # pyenv local 2.7.5 (changed the local pyenv to 2.7.5) (dont forget to create tmp folder)
+
+#Run MACS2 on all replicates
+rule run_nexus_macs2_individual:
+    input:
+        "bam/filtered/mtsc_{factor}_nexus_{rep}_filtered.bam"
+    output:
+        "macs2/individual/mtsc_{factor}_nexus_{rep}_peaks.narrowPeak"
+    params:
+        name = "mtsc_{factor}_nexus_{rep}",
+        outdir = "macs2/individual"
+    message: "Running MACS2 on individual BAM files..."
+    shell:
+        " macs2 callpeak -t {input} --tempdir tmp --qvalue {config[macs2_qval]} --nomodel --shift -75 --extsize 150 --keep-dup all -g mm -f BAM --outdir {params.outdir} -n {params.name}"
+
+#Run pairwise IDR: for each factor, run pairwise idr2 for each peak, then select the
+#--use-best-multisummit-IDR used because we used MACS2
+rule run_pairwise_IDR:
+    input:
+        "macs2/combined/mtsc_{factor}_nexus_peaks.narrowPeak"
+    output:
+        "idr/optimal/mtsc_{factor}_nexus_idr_peaks.txt"
+
+    message: "Run IDR pairwise..."
+    shell:
+        "bash scripts/run_pairwise_idr.sh {config[working_directory]} {input}"
+
+#Convert and format IDR peaks to a BED file
+rule idr_to_bed:
+    input:
+        "idr/optimal/mtsc_{factor}_nexus_idr_peaks.txt"
+    output:
+        "bed/peaks/mtsc_{factor}_nexus_idr_peaks.bed"
+
+    message: "Convert IDR to BED..."
+    run:
+        shell("Rscript scripts/idr_to_bed.R -i {input} -b {config[blacklistFile]} -g {config[BSgenome]} -o {output}")
+

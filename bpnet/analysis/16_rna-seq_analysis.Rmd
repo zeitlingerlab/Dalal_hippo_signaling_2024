@@ -1,0 +1,127 @@
+---
+title: "Differential RNA-seq analysis with edgeR"
+author: "Khyati Dalal"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    depth: 3
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{1028-02098-001-001}
+- \fancyfoot[LE,RO]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+editor_options:
+  chunk_output_type: console
+---
+# Introduction
+  
+  Performing differential RNA-seq analysis between WT and Ezr mut cell lines
+
+# Computational Setup
+```{r, warning=F, message=F}
+#Standard packages
+library(rtracklayer) ; library(GenomicRanges); library(magrittr) ; library(Biostrings)
+library(ggplot2) ; library(reshape2); library(plyranges); library(Rsamtools);library(parallel)
+library(dplyr); library(data.table); library(patchwork); library(readr); library(testit); library(edgeR);library(limma)
+
+#KNITR Options
+setwd("/n/projects/kd2200/publication/bpnet/analysis/")
+options(knitr.figure_dir="figures/", java.parameters = "- Xmx6g")
+
+#Lab sources
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/granges_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/knitr_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/caching.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/multiplot.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/motif_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_new.r")
+
+```
+
+
+# Perform edgeR analysis
+```{r}
+counts_1 <- read.csv("/n/projects/kd2200/publication/bpnet/analysis/csv/star_count_rep1.csv")
+counts_2 <- read.csv("/n/projects/kd2200/publication/bpnet/analysis/csv/star_count_rep2.csv")
+counts_3 <- read.csv("/n/projects/kd2200/publication/bpnet/analysis/csv/star_count_rep3.csv")
+
+
+colnames(counts_1) <- gsub("^s_", "", colnames(counts_1))
+colnames(counts_2) <- gsub("^s_", "", colnames(counts_2))
+colnames(counts_3) <- gsub("^s_", "", colnames(counts_3))
+
+rep1 <- counts_1 %>% dplyr::select(gene_id,mtsc_complete_wt,mtsc_ezr_d1_td_single_tdbl)
+rep2 <- counts_2 %>% dplyr::select(gene_id,mtsc_complete_wt_rep2,mtsc_ezr_d1_td_single_tdbl_rep2)
+rep3 <- counts_3 %>% dplyr::select(gene_id,mtsc_complete_wt_rep3,mtsc_ezr_d1_td_single_tdbl_rep3)
+
+combine_reps <- inner_join(rep1,rep2, by=c('gene_id'))
+combine_reps2 <- inner_join(combine_reps,rep3, by=c('gene_id'))
+
+colnames(combine_reps2) <- c("gene_id","wt_1","ezr_1","wt_2","ezr_2","wt_3","ezr_3")
+rownames(combine_reps2) = as.character(combine_reps2[, 'gene_id'])
+counts = combine_reps2[, -1]
+
+
+# create the groups and reps to compare
+run <- c("wt_1", "ezr_1","wt_2","ezr_2","wt_3","ezr_3")
+condition <-c("wt", "ezr","wt","ezr","wt","ezr")
+design.df <- data.frame(run,condition)
+
+# initialize edger object
+counts.DGEList <- DGEList(counts = counts,genes = rownames(counts))
+counts.DGEList$samples$group <- as.factor(design.df$condition)
+
+#filter lowly expressed genes
+counts.keep <- filterByExpr(counts.DGEList,group=condition)
+counts.DGEList_filtered <- counts.DGEList[counts.keep, , keep.lib.sizes = FALSE]
+
+
+#perform normalization
+counts.DGEList_filtered <- calcNormFactors(counts.DGEList_filtered)
+condition_ <- design.df$condition
+
+#estimate dispersion
+counts.DGEList_filtered <- estimateDisp(counts.DGEList_filtered,design = model.matrix(~condition_))
+
+
+# design matrix
+design = model.matrix(~0+counts.DGEList_filtered$samples$group)
+colnames(design) <- levels(counts.DGEList_filtered$samples$group)
+
+# diff expr test
+comparisons <- makeContrasts(levels = design,wtvsezr=wt-ezr)
+fit = glmQLFit(counts.DGEList_filtered, design) # fit model
+de <- glmQLFTest(fit, contrast=comparisons) #  de test
+results = topTags(de,nrow(de$counts))$table # de table
+write_tsv(results, "tsv/edgr_wt_ezrmut_three_reps.tsv")
+
+#check for p valve for Ezr gene :ENSMUSG00000052397 and spatially control gene Dynlt1f : ENSMUSG00000095677
+```
+
+# Session information
+
+For reproducibility, this analysis was performed with the following R/Bioconductor session:
+
+``` {r session_info, echo=FALSE, comment=NA}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
