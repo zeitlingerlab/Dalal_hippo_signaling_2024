@@ -54,12 +54,24 @@ source("/n/projects/kd2200/publication/bpnet/analysis/scripts/heatmap_common.r")
 
 motif_name=rep(c("a_control", "b_rin3_20", "c_rin3_60"),each=3)
 foldchange_average=c(a=c(1,0,0),b=c(383,0,0),c=c(77,0,0))
-foldchange_rep=c(a=c(1,1,1),b=c(380,350,530), c=c(87.2,69.5,72.9)) 
+foldchange_rep=c(a=c(1,1,1),b=c(380,250,530), c=c(87.2,69.5,72.9)) 
 
 df <- data.frame(motif_name, foldchange_average, foldchange_rep)
 
-p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
-    geom_bar(stat="identity",fill="#C3AEF8",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
+df_summary <- df %>%
+    group_by(motif_name) %>%
+    summarise(
+        foldchange_average = mean(foldchange_rep),
+        SEM = sd(foldchange_rep) / sqrt(n())
+    )
+
+p <- ggplot(data = df_summary, aes(x = motif_name, y = foldchange_average)) +
+    geom_bar(stat = "identity", fill = "#C3AEF8", width = 0.7) +
+    geom_errorbar(aes(ymin = foldchange_average - SEM, ymax = foldchange_average + SEM), width = 0.2) +
+    geom_point(data = df, aes(x = motif_name, y = foldchange_rep)) +
+    theme_classic() +
+    ylab("Normalized luciferase activity\n(fold change over control)") +
+    xlab("")
 
 #Run paired pairwise t-tests
 #kudos : https://www.datanovia.com/en/blog/how-to-perform-paired-pairwise-t-tests-in-r/
@@ -89,9 +101,19 @@ foldchange_rep=c(a=c(1,1,1),b=c(378.09,292.59,430), c=c(650.13,518.52,475))
 
 df <- data.frame(motif_name, foldchange_average, foldchange_rep)
 
-p <- ggplot(data=df, aes(x=motif_name, y=foldchange_average)) +
-    geom_bar(stat="identity",fill="#48C9B0",width=0.7)+geom_point(stat = "identity", aes(y=foldchange_rep))+theme_classic()+ylab(paste("Normalized luciferase activity\n(fold change over control)"))+xlab("")
-
+df_summary <- df %>%
+    group_by(motif_name) %>%
+    summarise(
+        foldchange_average = mean(foldchange_rep),
+        SEM = sd(foldchange_rep) / sqrt(n())
+    )
+p <- ggplot(data = df_summary, aes(x = motif_name, y = foldchange_average)) +
+    geom_bar(stat = "identity", fill = "#C3AEF8", width = 0.7) +
+    geom_errorbar(aes(ymin = foldchange_average - SEM, ymax = foldchange_average + SEM), width = 0.2) +
+    geom_point(data = df, aes(x = motif_name, y = foldchange_rep)) +
+    theme_classic() +
+    ylab("Normalized luciferase activity\n(fold change over control)") +
+    xlab("")
 
 stat.test <- df %>%
     pairwise_t_test(
