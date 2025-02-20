@@ -1,0 +1,261 @@
+"""
+Author: Khyati & Melanie
+Affiliation: Stowers Institute
+Aim: Pipeline for processing generally useful data that is utilized across projects. These files usually begin from the .bam stage.
+Date: August 2022
+Run: snakemake
+
+Main target rules:
+------------------
+
+- fastq_to_bam: Align sequences to genome using fastq or SRA Accession information
+    - nascent rna or rna seq:
+- bam_to_bw: Convert BAM reads to BW coverage files
+    - rna: (1) BAM to RSEM count table (2) can do bamtobigwig for rnaseq.
+    - nascent_rna : (1) strand seperate BAM (2)  export to bigwig
+"""
+
+##########################################################################################
+#Setup
+##########################################################################################
+import csv
+import os
+import math
+import numpy as np
+import pandas as pd
+from itertools import product
+
+##########################################################################################
+#Import external data and prepare configuration parameters.
+##########################################################################################
+SAMPLES = pd.read_csv(f'setup/samples_rna.csv').set_index("sample_name", drop=False) #match genome with right indexes
+SAMPLES.extension_length = SAMPLES.extension_length.fillna(0) #fill column with zeros for str(int(ext_length)) in macs2 rule
+SAMPLES_TO_COMBINE = SAMPLES[(SAMPLES['combined_sample_name'].notna()) & (SAMPLES['experiment']=='nascent_rna')].reset_index(drop=True)
+SAMPLES_TO_COMBINE = SAMPLES_TO_COMBINE[['experiment', 'genome','annotation','combined_sample_name', 'combined_output_sample', 'extension_length']].drop_duplicates()
+
+##########################################################################################
+# Request output files based on rules below
+##########################################################################################
+
+rule all:
+    input:
+        expand("bam/{genome}/{exp}/individual/{sample}_positive.bam", zip, sample = SAMPLES.sample_name, exp = SAMPLES.experiment, genome = SAMPLES.genome), #state = ['individual'] * SAMPLES.shape[0]),
+        expand("bam/{genome}/{exp}/combined/{sample}_positive.bam", zip, sample = SAMPLES_TO_COMBINE.combined_sample_name, exp = SAMPLES_TO_COMBINE.experiment, genome = SAMPLES_TO_COMBINE.genome),
+        expand("bw/{genome}/{exp}/individual/{sample}_positive.bw", zip, sample = SAMPLES.sample_name, exp = SAMPLES.experiment, genome = SAMPLES.genome),
+        expand("bw/{genome}/{exp}/combined/{sample}_positive.bw", zip, sample = SAMPLES_TO_COMBINE.combined_sample_name, exp = SAMPLES_TO_COMBINE.experiment, genome = SAMPLES_TO_COMBINE.genome),
+        expand("rsem/{genome}/{exp}/individual/{sample}.RSEM.genes.results", zip, sample = SAMPLES.sample_name, exp =  SAMPLES.experiment, genome = SAMPLES.genome),
+
+
+##########################################################################################
+# General sequencing rules
+##########################################################################################
+
+#Align the .fastq.gz file to the genome of interest depending on the sequencing data
+rule fastq_to_processed_bam:
+    priority: 10
+    output:
+        strand_separated = 'bam/{genome}/{exp}/individual/{sample}_positive.bam',
+        all_strands = 'bam/{genome}/{exp}/individual/{sample}Aligned.out.sort.bam'
+    params:
+        starting_file = lambda wildcards: SAMPLES.loc[wildcards.sample, 'starting_file'],
+        read2 = lambda wildcards: SAMPLES.loc[wildcards.sample, 'starting_file'].replace('_1.fastq.gz', '_2.fastq.gz'),
+        sequencing_type = lambda wildcards: SAMPLES.loc[wildcards.sample, 'sequencing_type'],
+        annotation_path = lambda wildcards: 'indexes/' + SAMPLES.loc[wildcards.sample, 'annotation'] + '/',
+        annotation= lambda wildcards: SAMPLES.loc[wildcards.sample, 'annotation'],
+        output_sample_prefix = 'bam/{genome}/{exp}/individual/{sample}',
+        threads = 6,
+        negative_strand_output_filepath = "bam/{genome}/{exp}/individual/{sample}_negative.bam",
+    message: 'Aligning FASTQ to BAM'
+    run:
+        if (wildcards.exp == 'nascent_rna') :
+            if params.sequencing_type == 'paired': 
+                shell(
+                    """
+                    STAR --readFilesIn {params.starting_file} {params.read2} \
+                        --genomeDir {params.annotation_path} \
+                        --runThreadN {params.threads} --runMode alignReads \
+                        --outFilterMismatchNmax 2 --outFilterMultimapScoreRange 0 \
+                        --outFileNamePrefix {params.output_sample_prefix} --outSAMtype BAM Unsorted \
+                        --quantMode TranscriptomeSAM GeneCounts --readFilesCommand zcat
+                    samtools view -h -f 2 -q 255 {params.output_sample_prefix}Aligned.out.bam | samtools view -b ->  {params.output_sample_prefix}Aligned.out.sel.bam
+                    samtools sort {params.output_sample_prefix}Aligned.out.sel.bam -o {output.all_strands} --threads {params.threads} -T tmp
+
+                    #Separate by strand
+                    samtools view -b -f 128 -F 16 --threads {params.threads} {output.all_strands} > {params.output_sample_prefix}_plus_128.bam
+                    samtools view  -b -f 80  --threads {params.threads} {output.all_strands}  > {params.output_sample_prefix}_plus_80.bam
+                    samtools view -b -f 144 --threads {params.threads} {output.all_strands} > {params.output_sample_prefix}_minus_144.bam
+                    #samtools view -b -f 144 --threads 6 bam/mm10/nascent_rna/individual/mtsc_ttseq_rna_1Aligned.out.sort.bam > bam/mm10/nascent_rna/individual/mtsc_ttseq_rna_1_minus_144.bam
+                    samtools view -b -f 64 -F 16 --threads {params.threads} {output.all_strands} > {params.output_sample_prefix}_minus_64.bam
+
+                    samtools merge --threads {params.threads} {output.strand_separated} {params.output_sample_prefix}_plus_128.bam  {params.output_sample_prefix}_plus_80.bam
+                    samtools merge --threads {params.threads} {params.negative_strand_output_filepath} {params.output_sample_prefix}_minus_144.bam  {params.output_sample_prefix}_minus_64.bam
+
+                    rm -f {params.output_sample_prefix}_plus_128.bam {params.output_sample_prefix}_plus_80.bam {params.output_sample_prefix}_minus_144.bam {params.output_sample_prefix}_minus_64.bam
+                    """)
+        elif (wildcards.exp == 'rna'):
+            if params.sequencing_type == 'single': 
+                shell(
+	               """
+                    STAR --readFilesIn {params.starting_file} \
+                        --genomeDir {params.annotation_path} \
+                        --runThreadN {params.threads} \
+                        --outSAMtype BAM SortedByCoordinate \
+                        --outFileNamePrefix {params.output_sample_prefix} \
+                        --outSAMprimaryFlag OneBestScore \
+                        --outFilterMultimapNmax 20 \
+                        --outFilterMismatchNoverLmax 0.1 \
+                        --outFilterType BySJout \
+                        --alignSJoverhangMin 8 \
+                        --alignSJDBoverhangMin 1 \
+                        --outFilterMismatchNmax 999 \
+                        --alignIntronMin 20 \
+                        --alignIntronMax 1000000 \
+                        --alignMatesGapMax 1000000 \
+                        --readFilesCommand zcat \
+                        --limitBAMsortRAM 10000000000 \
+                        --outSAMattributes NH HI MD AS nM \
+                        --quantMode TranscriptomeSAM GeneCounts
+                    cp {params.output_sample_prefix}Aligned.sortedByCoord.out.bam {output.strand_separated}
+                    cp {params.output_sample_prefix}Aligned.sortedByCoord.out.bam {output.all_strands}
+
+	            """
+	            )
+
+rule individual_bam_to_combined_bam:
+    priority: 10
+    input:
+        pos_ind=lambda wildcards: ['bam/{genome}/{exp}/individual/' + s + '_positive.bam' for s in SAMPLES.sample_name[SAMPLES.combined_sample_name == wildcards.sample]],
+        neg_ind=lambda wildcards: ['bam/{genome}/{exp}/individual/' + s + '_negative.bam' for s in SAMPLES.sample_name[SAMPLES.combined_sample_name == wildcards.sample]],
+    output:
+        ind_comb_pos="bam/{genome}/{exp}/combined/{sample}_positive.bam",
+        ind_comb_neg="bam/{genome}/{exp}/combined/{sample}_negative.bam",
+    params:
+        genome = '{genome}',
+        exp = '{exp}',
+    message: "Converting bam to merged bam"
+    run:
+        if wildcards.exp == 'nascent_rna':
+            shell(
+            """
+            samtools merge {output.ind_comb_pos} {input.pos_ind}
+            samtools merge {output.ind_comb_neg} {input.neg_ind}
+            """
+            )
+
+
+rule individual_bam_to_individual_bw:
+    priority: 5
+    input:
+        "bam/{genome}/{exp}/individual/{sample}_positive.bam",
+    output:
+        "bw/{genome}/{exp}/individual/{sample}_positive.bw",
+    params:
+        #rdata_name = "bam/{genome}/{exp}/individual/{sample}".replace('bam/', 'rdata/'),
+        #rdata_dir = "bam/{genome}/{exp}/individual/".replace('bam/', 'rdata/'),
+        sequencing_type = lambda wildcards: SAMPLES.loc[wildcards.sample, 'sequencing_type'],
+        negative_input_sample_name = "bam/{genome}/{exp}/individual/{sample}_negative.bam",
+        negative_output_sample_name = "bw/{genome}/{exp}/individual/{sample}_negative.bw",
+        threads = 4,
+    message: "Computing coverage of .bam file..."
+    run:
+        if (wildcards.exp == 'nascent_rna'):
+            if params.sequencing_type == 'paired':
+                shell(
+                """          
+                    #mkdir -p {params.rdata_dir}
+
+                    samtools index {input}
+                    bamCoverage --scaleFactor 1  -bs 50 -p {params.threads} -b {input} --extendReads -o {output}
+
+                    samtools index {params.negative_input_sample_name}
+                    bamCoverage --scaleFactor 1  -bs 50 -p {params.threads} -b {params.negative_input_sample_name} --extendReads -o {params.negative_output_sample_name}
+
+                """
+                )
+        elif (wildcards.exp == 'rna'):
+            if params.sequencing_type == 'single':
+                shell(
+                    """
+                    samtools index {input}
+                    bamCoverage --scaleFactor 1  -bs 50 -p {params.threads} -b {input} --extendReads 150 -o {output}
+
+                    """
+                )
+
+rule combined_bam_to_combined_bw:
+    priority: 5
+    input:
+        "bam/{genome}/{exp}/combined/{sample}_positive.bam",
+    output:
+        "bw/{genome}/{exp}/combined/{sample}_positive.bw",
+    params:
+        rdata_name = "bam/{genome}/{exp}/combined/{sample}".replace('bam/', 'rdata/'),
+        rdata_dir = "bam/{genome}/{exp}/combined/".replace('bam/', 'rdata/'),
+        #sequencing_type = lambda wildcards: SAMPLES.loc[wildcards.sample, 'sequencing_type'],
+        negative_input_sample_name = "bam/{genome}/{exp}/combined/{sample}_negative.bam",
+        negative_output_sample_name = "bw/{genome}/{exp}/combined/{sample}_negative.bw",
+        threads = 4,
+    message: "Computing coverage of .bam file..."
+    run:
+        if (wildcards.exp == 'nascent_rna'):
+            #if params.sequencing_type == 'paired':
+                shell(
+                """
+                    #mkdir -p {params.rdata_dir}
+
+                    samtools index {input}
+                    bamCoverage --scaleFactor 1  -bs 50 -p {params.threads} -b {input}  --extendReads -o {output}
+
+                    samtools index {params.negative_input_sample_name}
+                    bamCoverage --scaleFactor 1  -bs 50 -p {params.threads} -b {params.negative_input_sample_name}  --extendReads -o {params.negative_output_sample_name}
+                """
+                )
+        elif (wildcards.exp == 'rna'):
+            #if params.sequencing_type == 'single': 
+                shell(
+                    """
+
+                    """
+                )
+
+rule generate_rsem_expression_table:
+    priority: 5
+    input:
+        'bam/{genome}/{exp}/individual/{sample}Aligned.toTranscriptome.out.bam'
+    output:
+        "rsem/{genome}/{exp}/individual/{sample}"
+    params:
+        annotation= "indexes/Ens_102/RSEM/mm10.Ens_102.RSEM",
+        sequencing_type = lambda wildcards: SAMPLES.loc[wildcards.sample, 'sequencing_type'],
+        logs= "rsem/{genome}/{exp}/individual/{sample}.log",
+        threads = 4,
+    message: "Calculating RSEM for individual samples..."
+    run:
+        if (wildcards.exp == 'nascent_rna') :
+            if params.sequencing_type == 'paired': 
+                shell(
+                    """
+                    rsem-calculate-expression --no-bam-output --estimate-rspd  --paired-end --strandedness reverse -p {params.threads} \
+                    --bam {input} {params.annotation} >& {params.logs} {output}
+                    """)
+        elif (wildcards.exp == 'rna'):
+            if params.sequencing_type == 'single': 
+                shell(
+                   """
+                    rsem-calculate-expression --no-bam-output --estimate-rspd  --strandedness reverse \
+                    --bam {input} {params.annotation} >& {params.logs} {output}
+
+                """
+                )
+
+
+
+
+#rsem-calculate-expression --no-bam-output --estimate-rspd --strandedness reverse --paired-end -p 5 --bam bam/mm10/nascent_rna/individual/mtsc_ttseq_rna_3Aligned.toTranscriptome.out.bam indexes/Ens_102/RSEM/mm10.Ens_102.RSEM >& rsem/mm10/nascent_rna/individual/mtsc_ttseq_rna_3.log rsem/mm10/nascent_rna/individual/mtsc_ttseq_rna_3.RSEM
+#rsem-calculate-expression --no-bam-output --estimate-rspd --strandedness reverse --paired-end -p 5 --bam bam/mm10/nascent_rna/individual/mtsc_ttseq_rna_2Aligned.toTranscriptome.out.bam indexes/Ens_102/RSEM/mm10.Ens_102.RSEM >& rsem/mm10/nascent_rna/individual/mtsc_ttseq_rna_2.log rsem/mm10/nascent_rna/individual/mtsc_ttseq_rna_2.RSEM
+#rsem-calculate-expression --no-bam-output --estimate-rspd --strandedness reverse --paired-end -p 3 --bam bam/mm10/nascent_rna/individual/mtsc_ttseq_rna_1Aligned.toTranscriptome.out.bam indexes/Ens_102/RSEM/mm10.Ens_102.RSEM >& rsem/mm10/nascent_rna/individual/mtsc_ttseq_rna_1.log rsem/mm10/nascent_rna/individual/mtsc_ttseq_rna_1.RSEM
+
+# I marked duplicates using picard in one of the sample of tt-seq and it shows 0.19% of duplicates.. so I will not be removing duplicates from tt-seq samples.
+# kd2200@cypress /n/projects/kd2200/analysis/nascent_rna-seq/tt-seq/analysis/sample3$ java -jar ../scripts/picard_v2.23.8.jar  MarkDuplicates \
+# INPUT=mtsc_4su_10min_sample3_Aligned.unique.sorted.out.bam   OUTPUT=mtsc_4su_10min_sample3_Aligned.unique.sorted.marked.out.bam METRICS_FILE=mtsc_4su_10min_sample3_sorted.marked.metrics \
+# REMOVE_DUPLICATES=false ASSUME_SORTED=true VALIDATION_STRINGENCY=LENIENT TMP_DIR=tmp  MAX_RECORDS_IN_RAM=2000000

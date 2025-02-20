@@ -1,0 +1,1 @@
+cmd = homer_peakanalysis/mtsc_tead4_nexus_summits_top1000_resized_200bp_center_new.bed /n/projects/kd2200/analysis/BPNet/cegkttyz_tsc_bpnet/tsc_model_morval_idr_peaks_morereps_wotead4/bpnet/fasta/mm10.fa homer_peakanalysis/motif_output_dir/ -find /n/projects/kd2200/publication/rebuttal/homer_peakanalysis/homerResults/motif1.motif

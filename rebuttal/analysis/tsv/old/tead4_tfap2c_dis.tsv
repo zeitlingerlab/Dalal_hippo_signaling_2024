@@ -1,0 +1,41 @@
+"oneway.test( q.df$contrib_of_yap1_at_tfap2c_motif ~ q.df$binned_distance,"												
+"+                            data = q.df,"												
++                            var.equal = FALSE # assuming unequal variances												
++               )												
+												
+        One-way analysis of means (not assuming equal variances)												
+												
+data:  q.df$contrib_of_yap1_at_tfap2c_motif and q.df$binned_distance												
+"F = 43.509, num df = 5.00, denom df = 609.15, p-value < 2.2e-16"												
+												
+When you have unequal variances among groups (or if youÕre unsure and want to be cautious).												
+When you have unequal sample sizes across groups.												
+When conducting a simple one-way ANOVA.												
+												
+												
+library(rstatix)										Games-Howell post-hoc test on your data using the games_howell_test() function from the rstatix package in R. 		
+> q.df %>% games_howell_test(contrib_of_yap1_at_tfap2c_motif ~ binned_distance)										The Games-Howell test is a post-hoc test used after an ANOVA when you want to compare the means of different groups while accounting for unequal variances and unequal sample sizes.		
+# A tibble: 15 _ 8												
+   .y.                             group1 group2 estimate conf.low conf.high         p.adj p.adj.signif												
+ * <chr>                           <chr>  <chr>     <dbl>    <dbl>     <dbl>         <dbl> <chr>       												
+ 1 contrib_of_yap1_at_tfap2c_motif 1      2      -0.0324   -0.0560  -0.00873 0.001         ***         												".y.: This column indicates the dependent variable being analyzed, which in this case is contrib_of_yap1_at_tfap2c_motif. This is the contribution of YAP1 at the TFAP2C motif."
+ 2 contrib_of_yap1_at_tfap2c_motif 1      3      -0.0673   -0.0891  -0.0454  0             ****        												
+ 3 contrib_of_yap1_at_tfap2c_motif 1      4      -0.0740   -0.0976  -0.0504  0.00000000018 ****        												group1: The first group in the pairwise comparison based on binned_distance.
+ 4 contrib_of_yap1_at_tfap2c_motif 1      5      -0.0904   -0.115   -0.0655  0             ****        												
+ 5 contrib_of_yap1_at_tfap2c_motif 1      6      -0.103    -0.127   -0.0800  0             ****        												group2: The second group in the pairwise comparison based on binned_distance.
+ 6 contrib_of_yap1_at_tfap2c_motif 2      3      -0.0349   -0.0584  -0.0114  0.000368      ***         												
+ 7 contrib_of_yap1_at_tfap2c_motif 2      4      -0.0416   -0.0667  -0.0165  0.0000403     ****        												estimate: This column shows the difference in means (group1 - group2) for the pairwise comparison. A negative value indicates that the mean for group1 is lower than for group2.
+ 8 contrib_of_yap1_at_tfap2c_motif 2      5      -0.0580   -0.0844  -0.0317  0.0000000121  ****        												
+ 9 contrib_of_yap1_at_tfap2c_motif 2      6      -0.0710   -0.0959  -0.0461  0             ****        												conf.low: The lower bound of the confidence interval for the mean difference. This interval gives a range of plausible values for the true difference in means.
+10 contrib_of_yap1_at_tfap2c_motif 3      4      -0.00675  -0.0302   0.0167  0.963         ns          												
+11 contrib_of_yap1_at_tfap2c_motif 3      5      -0.0232   -0.0480   0.00166 0.083         ns          												conf.high: The upper bound of the confidence interval for the mean difference.
+12 contrib_of_yap1_at_tfap2c_motif 3      6      -0.0361   -0.0593  -0.0129  0.000162      ***         												
+13 contrib_of_yap1_at_tfap2c_motif 4      5      -0.0164   -0.0427   0.00991 0.476         ns          												p.adj: The adjusted p-value for the pairwise comparison. This p-value tells you whether the difference between the two groups is statistically significant after adjusting for multiple comparisons.
+14 contrib_of_yap1_at_tfap2c_motif 4      6      -0.0294   -0.0542  -0.00452 0.01          **          												
+15 contrib_of_yap1_at_tfap2c_motif 5      6      -0.0129   -0.0391   0.0132  0.714         ns          												p.adj.signif: The significance level for the adjusted p-value. Common symbols include:
+> 												
+												****: p ² 0.0001 (very highly significant)
+												***: 0.0001 < p ² 0.001 (highly significant)
+												**: 0.001 < p ² 0.01 (significant)
+												*: 0.01 < p ² 0.05 (marginally significant)
+												ns: p > 0.05 (not significant)

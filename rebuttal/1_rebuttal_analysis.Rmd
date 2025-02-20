@@ -1,0 +1,3159 @@
+---
+title: "rebuttal_analysis"
+author: "Khyati"
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document:
+    depth: 3
+    theme: sandstone
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+header-includes:
+- \usepackage{fancyhdr}
+- \usepackage{lipsum}
+- \pagestyle{fancy}
+- \fancyfoot[CO,CE]{}
+- \fancyfoot[LE,RO]{\thepage}
+- \fancypagestyle{plain}{\pagestyle{fancy}}
+editor_options:
+  chunk_output_type: console
+---
+
+# Introduction
+
+Here, we want to investigate, upon PWM scanning based on the PWM representation of the TF-MoDISco seqlets, whether our CWM scanning approach returns high-quality motifs. We also want to check whether the PWM-scanned false positive motifs are all poor matches (i.e. is PWM scanning totally fine at high affinities?) and whether our hit mapping thresholds appropriately find sequences of high contribution.
+
+Other analysis that went into rebuttal plan are also incuded.
+
+# Computational Setup
+
+```{r, warning=F, message=F}
+#Standard packages
+library(rtracklayer) ; library(GenomicRanges); library(magrittr) ; library(Biostrings)
+library(ggplot2) ; library(reshape2); library(plyranges); library(Rsamtools); library(parallel)
+library(dplyr); library(data.table); library(patchwork); library(readr); library(testit)
+
+#KNITR Options
+setwd("/n/projects/kd2200/publication/rebuttal/")
+figure_filepath<-"figures/final/"
+options(knitr.figure_dir=figure_filepath, java.parameters = "- Xmx6g")
+
+#Lab sources
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/granges_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/knitr_common.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/caching.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/metapeak_new.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/motif_functions.R")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/bpnet/motif_functions.r")
+source("/n/projects/kd2200/publication/bpnet/analysis/scripts/1.motif_summary/tsc_variables.R")
+
+#Specific sources
+library(BSgenome.Mmusculus.UCSC.mm10)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(org.Mm.eg.db)
+library(ggseqlogo)
+
+#Pre-existing variables
+threads <- 5
+dir.create('memesuite/seqs/seqlets', recursive = T, showWarnings = F)
+dir.create('rdata', recursive = T, showWarnings = F)
+bsgenome<-BSgenome.Mmusculus.UCSC.mm10
+txdb<-TxDb.Mmusculus.UCSC.mm10.knownGene
+
+meme.path<-'/n/projects/kd2200/publication/rebuttal/mtsc_tead4_macs2_peaks_nexus_top1000_101bpwidth/meme.txt'
+regions.path<-'/n/projects/kd2200/publication/bpnet/analysis/bed/curated_island_regoion_tsc_model_motifs_fold5_0based.bed'
+motifs.path<-'/n/projects/kd2200/publication/bpnet/analysis/tsv/curated_motif_regoion_tsc_model_motifs_fold5_1based.tsv.gz'
+peaks.path.list <- '/n/projects/kd2200/publication/bpnet/bed/mtsc_cttyg_combine_idr_peaks.bed'
+output_length <- 1000
+
+meme_patterns.list<-list('MEME-1' = 'tead4', 'MEME-3' = 'tead4_double')
+modisco_patterns.list<-list('tead4_0' = 'tead4', 'tead4_double_1' = 'tead4_double')
+modisco_patterns_inverse.list<-list('tead4' = 'tead4_0', 'tead4_double' = 'tead4_double_1')
+
+seqlet_patterns.list<-list('tead4' = '/n/projects/kd2200/publication/bpnet/modisco/profile/dataspec.yaml_default_fold_5/tead4/seqlets/metacluster_0/pattern_0.bed.gz', 
+                           'tead4_double' = '/n/projects/kd2200/publication/bpnet/modisco/profile/dataspec.yaml_default_fold_5/tead4/seqlets/metacluster_0/pattern_1.bed.gz')
+```
+
+# Import motifs
+
+
+```{r}
+
+# meme:
+#ml meme/5.3.0
+
+peaks.gr <- import.bed("/n/projects/kd2200/publication/bpnet_prep/macs2/combined/mtsc_tead4_nexus_summits.bed")
+
+peaks.gr<-peaks.gr[order(peaks.gr$score, decreasing = TRUE)][1:1000]
+
+ write_fasta <- function(regions, size_extension, output_filepath, genome=BSgenome.Mmusculus.UCSC.mm10){
+   sequence <- getSeq(genome, resize(regions, size_extension, "center"))
+   names(sequence) <- paste0(output_filepath, "_peak", 1:length(sequence))
+   writeXStringSet(sequence, output_filepath)
+ }
+write_fasta(regions=peaks.gr, size_extension=101, output_filepath="/n/projects/kd2200/publication/rebuttal/mtsc_tead4_macs2_peaks_nexus_top1000_101bpwidth.fasta")
+
+#motifs_all.gr<-readr::read_tsv(motifs.path) %>%
+# makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based = T) #for some reason motifs are mislabeled as 1based.
+#motifs_all.gr$pattern_name %>% table
+
+#regions.gr<-GRanges(seqnames(motifs_all.gr), IRanges(motifs_all.gr$pattern_start + motifs_all.gr$example_start, motifs_all.gr$pattern_end + motifs_all.gr$example_end), strand = '*') %>%
+#  plyranges::mutate(start = start + 100, end = end - 100) %>%
+#  reduce(., ignore.strand = T)
+
+# cwm motifs
+tead4_double.df <- read_tsv("/n/projects/kd2200/publication/bpnet/cwm_all_regions/tead4/instances_by_pattern/m0_p1_motif-instances-all-regions.tsv.gz")
+tead4_double.gr <- tead4_double.df %>% makeGRangesFromDataFrame(seqnames.field = "example_chrom",start.field = "pattern_start_abs", end.field = "pattern_end_abs",keep.extra.columns = T, starts.in.df.are.0based = T)
+tead4_double.gr <- unique(tead4_double.gr)
+
+tead4.df <- read_tsv("/n/projects/kd2200/publication/bpnet/cwm_all_regions/tead4/instances_by_pattern/m0_p0_motif-instances-all-regions.tsv.gz")
+tead4.gr <- tead4.df %>% makeGRangesFromDataFrame(seqnames.field = "example_chrom",start.field = "pattern_start_abs", end.field = "pattern_end_abs",keep.extra.columns = T, starts.in.df.are.0based = T)
+tead4.gr <- unique(tead4.gr)
+
+#erv
+rm <- readRDS("/n/projects/mw2098/genomes/mm10/repeatmasker.mm10.gr.rds")
+erv <- rm[grep("ERV", rm$repeat_class)]
+
+tead4_double_noerv.gr <- tead4_double.gr[which(!overlapsAny(tead4_double.gr, erv, ignore.strand=T))]
+tead4_noerv.gr <- tead4.gr[which(!overlapsAny(tead4.gr, erv, ignore.strand=T))]
+
+# remove palindormic
+tead4_double_noerv.gr$pattern_name <- "tead4_double"
+tead4_double_noerv.gr <- remove_palindromic_motifs_from_bpnet_instances(tead4_double_noerv.gr , pattern_to_filter="tead4_double")
+
+tead4_noerv.gr$pattern_name <- "tead4"
+tead4_noerv.gr <- remove_palindromic_motifs_from_bpnet_instances(tead4_noerv.gr , pattern_to_filter="tead4")
+
+#getseq
+tead4_noerv.gr$dna <- getSeq(BSgenome.Mmusculus.UCSC.mm10,  tead4_noerv.gr)
+tead4_double_noerv.gr$dna <- getSeq(BSgenome.Mmusculus.UCSC.mm10,tead4_double_noerv.gr)
+
+ggplot() + geom_logo(as.data.frame(tead4_noerv.gr$dna)) + theme_logo()
+ggplot() + geom_logo(as.data.frame(tead4_double_noerv.gr$dna)) + theme_logo()
+
+#rev complement
+test <- tead4_double_noerv.gr$dna
+test2 <- Biostrings::reverseComplement(test)
+test2 <- as.data.frame(test2)
+tead4_double_noerv.gr$dna2 <- test2$x
+ggplot() + geom_logo(as.data.frame(tead4_double_noerv.gr$dna2)) + theme_logo()
+
+
+motifs_tead4s_noervs.gr <- c(tead4_noerv.gr,  tead4_double_noerv.gr)
+
+
+readr::write_tsv(as.data.frame(tead4_noerv.gr), 'analysis/tsv/new_tead4_noerv.tsv.gz')
+readr::write_tsv(as.data.frame(tead4_double_noerv.gr), 'analysis/tsv/new_tead4_double_noerv.tsv.gz')
+```
+
+```{r}
+# peak regions
+peaks.gr<-lapply(peaks.path.list, function(x) rtracklayer::import(x)) %>% as('GRangesList') %>% unlist() %>% reduce(., ignore.strand = T)
+peaks.gr$peak_id <- 1:length(peaks.gr)
+peaks.gr<- peaks.gr[seqnames(peaks.gr) != "chrM"] #108404
+
+
+motifs_all.gr<-readr::read_tsv(motifs.path) %>%
+  makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based = T) #for some reason motifs are mislabeled as 1based.
+motifs_all.gr$pattern_name %>% table
+
+regions.gr<-GRanges(seqnames(motifs_all.gr), IRanges(motifs_all.gr$pattern_start + motifs_all.gr$example_start, motifs_all.gr$pattern_end + motifs_all.gr$example_end), strand = '*') %>%
+  plyranges::mutate(start = start + 100, end = end - 100) %>%
+  GenomicRanges::reduce(., ignore.strand = T)
+  
+
+peak_motif_ov <- findOverlaps(regions.gr,peaks.gr, ignore.strand=T)
+regions_new.gr <- regions.gr[peak_motif_ov@from]
+regions_new.gr <- unique(regions_new.gr)#88016
+
+
+
+```
+
+# Extract seqlet PWM to MEME format
+
+## Extract seqlet logos
+
+Define TF mapped motifs
+
+```{r}
+tf_seqlet_ids.df<-data.frame(
+      pattern_name = c('pattern_0', 'pattern_1'),
+      motif = unlist(modisco_patterns.list),
+      oriented_strand = c('+', '+'),
+      task = c('tead4', 'tead4')
+)
+```
+
+# Run FIMO on .fa sequences
+
+Export all regions to .fa file
+
+```{r, eval = F}
+#regions.seq<-getSeq(bsgenome, regions.gr)
+#names(regions.seq)<-paste0(seqnames(regions.gr), ':', start(regions.gr), '-', end(regions.gr)) #FIMO works with 1-based coords
+#writeXStringSet(regions.seq, 'analysis/memesuite/all_idr_peaks_seqs.fa')
+
+
+regions_new.seq<-getSeq(bsgenome, regions_new.gr)
+names(regions_new.seq)<-paste0(seqnames(regions_new.gr), ':', start(regions_new.gr), '-', end(regions_new.gr)) #FIMO works with 1-based coords
+writeXStringSet(regions_new.seq, 'analysis/memesuite/all_peaks_motifs_ov_seqs.fa')
+```
+
+
+Get IC logo.
+
+```{r}
+
+# ic.list<-lapply(tf_seqlet_ids.df$motif, function(x){
+#     gr<-rtracklayer::import(seqlet_patterns.list[[x]])
+#     seqs<-getSeq(bsgenome, gr, as.character = T)
+#     seq_ic<-ppm_to_ic(seq_to_ppm(seqs),  bg_freq = c(.3, .2, .2, .3))
+#     readr::write_lines(seqs, file = paste0('analysis/memesuite/seqlets/', x, '.txt'))
+#     return(seq_ic)
+# })
+# names(ic.list)<-tf_seqlet_ids.df$motif
+
+
+#Get IC content for cwm
+ic.list<-lapply(names(seqlet_patterns.list), function(x){
+  seqs<-rtracklayer::import(seqlet_patterns.list[[x]]) %>%
+    getSeq(bsgenome, ., as.character = T)
+  seq_ic<-ppm_to_ic(seq_to_ppm(seqs),  bg_freq = c(.3, .2, .2, .3))
+  readr::write_lines(seqs, file = paste0('analysis/memesuite/seqs/', x, '.txt'))
+  return(seq_ic)
+})
+names(ic.list)<-names(seqlet_patterns.list)
+```
+
+## take marg score and populate coreesponsding sequences that many times
+```{r}
+
+tead4_double_no_ervs_marg <- read_csv("/n/projects/kd2200/publication/rebuttal/heatmap/new_tead4_double_noervs_preds_summary_allseq_v2.csv")
+tead4_no_ervs_marg <- read_csv("/n/projects/kd2200/publication/rebuttal/heatmap/new_tead4_noervs_preds_summary_allseq_v2.csv")
+
+#sort by marg score of tead4
+tead4_double_no_ervs_marg <- tead4_double_no_ervs_marg[order(tead4_double_no_ervs_marg$tead4,decreasing = T), ]
+tead4_no_ervs_marg <- tead4_no_ervs_marg[order(tead4_no_ervs_marg$tead4,decreasing = T), ]
+
+populate_MS_sequences <- function(motifs, scores) {
+  # Initialize an empty list to store the sequences
+  sequences <- c()
+  
+  # Loop through each motif and score
+  for (i in seq_along(motifs)) {
+    score <- as.integer(scores[i])  # Convert the score to integer
+    
+    # Repeat the motif based on the score and append to sequences
+    sequences <- c(sequences, rep(motifs[i], score))
+  }
+  
+  return(sequences)
+}
+
+tead4_double_no_ervs_marg_seqs <- populate_MS_sequences(tead4_double_no_ervs_marg$sequence, tead4_double_no_ervs_marg$tead4)
+tead4_no_ervs_marg_seqs <- populate_MS_sequences(tead4_no_ervs_marg$sequence, tead4_no_ervs_marg$tead4)
+
+readr::write_lines(tead4_double_no_ervs_marg_seqs,'analysis/memesuite/seqlets/marg_tead4double/tead4_double_no_ervs_marg_seqs.txt')
+
+readr::write_lines(tead4_no_ervs_marg_seqs,'analysis/memesuite/seqlets/marg_tead4single/tead4_no_ervs_marg_seqs.txt')
+
+```
+
+## Convert sequences to MEME format
+Note: analysis/memesuite/seqlets has to the directory of the seqlets txt file.
+```{bash, eval = F}
+ml meme/5.5.3
+sites2meme rebuttal/analysis/memesuite/seqlets > rebuttal/analysis/memesuite/custom_meme.txt
+
+sites2meme ./rebuttal/analysis/memesuite/seqlets/marg_tead4double > ./rebuttal/analysis/memesuite/seqlets/marg_tead4double/tead4_double_no_ervs_marg_seqs_custom.txt
+
+sites2meme ./rebuttal/analysis/memesuite/seqlets/marg_tead4single > ./rebuttal/analysis/memesuite/seqlets/marg_tead4single/tead4_no_ervs_marg_seqs_custom.txt
+```
+
+##Run FIMO on default significance settings
+## run below command on command line. therefore commented out
+```{bash, eval = F}
+cmds_all.vec<-c('#!bin/bash', 'module load meme',
+               paste0('fimo --oc memesuite --skip-matched-sequence --parse-genomic-coord --max-strand --max-stored-scores 10000000 ', meme.path, ' ./analysis/memesuite/all_idr_peaks_seqs.fa > ./rebuttal/analysis/memesuite/fimo_matches_default_settings.tsv'))
+writeLines(cmds_all.vec, 'analysis/scan_pwms_using_fimo_defaults.sh')
+
+#run following command on command line
+bash ./rebuttal/analysis/scan_pwms_using_fimo_defaults.sh
+
+
+
+cmds_all.vec<-c('#!bin/bash', 'module load meme',
+                 paste0('fimo --oc memesuite --skip-matched-sequence --parse-genomic-coord --max-strand --max-stored-scores 10000000 ', meme.path, ' ./analysis/memesuite/all_peaks_motifs_ov_seqs.fa > ./analysis/memesuite/fimo_matches_default_settings_new.tsv'))
+ writeLines(cmds_all.vec, 'analysis/scan_pwms_using_fimo_defaults_new.sh')
+```
+
+## Run FIMO on seqlet PPMs
+
+```{bash, eval = F}
+cmds_all.vec<-c('#!bin/bash', 'module load meme', 
+                paste0('fimo --oc memesuite --skip-matched-sequence --parse-genomic-coord --max-strand --max-stored-scores 10000000 ./rebuttal/analysis/memesuite/custom_meme.txt ./rebuttal/analysis/memesuite/all_peaks_motifs_ov_seqs.fa > ./rebuttal/analysis/memesuite/fimo_matches_seqlet_pwm.tsv'))
+writeLines(cmds_all.vec, 'rebuttal/analysis/scan_pwms_using_fimo_seqlets.sh')
+
+#run following command on command line
+#bash ./rebuttal/analysis/scan_pwms_using_fimo_seqlets.sh
+```
+
+## Run FIMO on marg PPMs
+
+```{bash, eval = F}
+
+fimo --oc memesuite --skip-matched-sequence --parse-genomic-coord --max-strand --max-stored-scores 10000000  rebuttal/analysis/memesuite/seqlets/marg_tead4double/tead4_double_no_ervs_marg_seqs_custom.txt rebuttal/analysis/memesuite/all_peaks_motifs_ov_seqs.fa > rebuttal/analysis/memesuite/seqlets/marg_tead4double/fimo_matches_tead4_double_no_ervs_marg_seqs.tsv
+
+fimo --oc memesuite --skip-matched-sequence --parse-genomic-coord --max-strand --max-stored-scores 10000000  rebuttal/analysis/memesuite/seqlets/marg_tead4single/tead4_no_ervs_marg_seqs_custom.txt rebuttal/analysis/memesuite/all_peaks_motifs_ov_seqs.fa > rebuttal/analysis/memesuite/seqlets/marg_tead4single/fimo_matches_tead4_no_ervs_marg_seqs.tsv
+
+```
+
+# Filter palindromes and redundant mappings for PWM-scanning
+
+```{r}
+#Import PWM-matched motifs and assign information to them
+pwm_defaults.df<-readr::read_tsv('./analysis/memesuite/fimo_matches_default_settings_new.tsv') %>% dplyr::filter(motif_alt_id %in% names(meme_patterns.list)) 
+pwm_defaults.gr<-pwm_defaults.df %>%
+  makeGRangesFromDataFrame(keep.extra.columns = T, ignore.strand = F, 
+                           starts.in.df.are.0based = F, seqnames.field = 'sequence_name') 
+
+ov<-findOverlaps(pwm_defaults.gr, regions.gr, ignore.strand = T)
+ov<-ov[!duplicated(ov@from)]
+
+pwm_defaults.df<-pwm_defaults.df[ov@from,]
+pwm_defaults.df<-pwm_defaults.df %>% dplyr::mutate(peak_region_id = ov@to)
+print(pwm_defaults.df %>% dim) #50315    11
+
+#Remove duplicates as there are many motifs likely to be palindromic
+pwm_defaults.gr<-lapply(pwm_defaults.gr$motif_alt_id %>% unique, function(x){
+  gr<-remove_palindromic_motifs_from_bpnet_instances(pwm_defaults.df, x, 
+                                                         chrom_name = 'sequence_name', 
+                                                         start_name = 'start', 
+                                                         end_name = 'stop',
+                                                         value_name = 'score',
+                                                         motif_name = 'motif_alt_id',
+                                                         region_name = 'peak_region_id',
+                                                         starts.in.df.are.0based = F)
+}) %>% as('GRangesList') %>% unlist()
+
+
+pwm_defaults.gr$motif<-lapply(pwm_defaults.gr$motif_alt_id, function(x) meme_patterns.list[[x]]) %>% unlist
+
+#316 palindromic motifs removed of 29671
+#599 palindromic motifs removed of 20644
+
+#remove ervs
+pwm_defaults_noerv.gr <- pwm_defaults.gr[which(!overlapsAny(pwm_defaults.gr, erv, ignore.strand=T))]
+pwm_defaults_noerv.gr$motif %>% table()
+#     tead4 tead4_double 
+#      24760        17889 
+```
+
+## Seqlet PWM FIMO 
+
+```{r}
+#Import PWM-matched motifs and assign information to them
+pwm_seqletsource.df<-readr::read_tsv('./analysis/memesuite/fimo_matches_seqlet_pwm.tsv')
+pwm_seqletsource.gr<-pwm_seqletsource.df %>%
+  makeGRangesFromDataFrame(keep.extra.columns = T, ignore.strand = F, 
+                           starts.in.df.are.0based = F, seqnames.field = 'sequence_name') 
+
+ov<-findOverlaps(pwm_seqletsource.gr, regions.gr, ignore.strand = T)
+ov<-ov[!duplicated(ov@from)]
+
+pwm_seqletsource.df<-pwm_seqletsource.df[ov@from,]
+pwm_seqletsource.df<-pwm_seqletsource.df %>% dplyr::mutate(island_id = ov@to)
+print(pwm_seqletsource.df %>% dim)
+#50847    11
+
+#Remove duplicates as there are many motifs likely to be palindromic
+pwm_seqletsource.gr<-lapply(pwm_seqletsource.gr$motif_id %>% unique, function(x){
+  gr<-remove_palindromic_motifs_from_bpnet_instances(pwm_seqletsource.df, x, 
+                                                         chrom_name = 'sequence_name', 
+                                                         start_name = 'start', 
+                                                         end_name = 'stop',
+                                                         value_name = 'score',
+                                                         motif_name = 'motif_id',
+                                                         region_name = 'island_id',
+                                                         starts.in.df.are.0based = F)
+}) %>% as('GRangesList') %>% unlist()
+pwm_seqletsource.gr$motif<-pwm_seqletsource.gr$motif_id
+
+#149 palindromic motifs removed of 25823
+#2160 palindromic motifs removed of 25024
+
+#remove ervs
+pwm_seqletsource_noerv.gr <- pwm_seqletsource.gr[which(!overlapsAny(pwm_seqletsource.gr, erv, ignore.strand=T))]
+pwm_seqletsource_noerv.gr $motif %>% table()
+#      tead4 tead4_double 
+#       21550        20634  
+```
+
+## marg-CWM PWM FIMO 
+
+```{r}
+#Import PWM-matched motifs and assign information to them
+fimo_matches_tead4_no_ervs_marg_seqs.df<-readr::read_tsv('analysis/memesuite/seqlets/marg_tead4single/fimo_matches_tead4_no_ervs_marg_seqs.tsv')
+fimo_matches_tead4_no_ervs_marg_seqs.gr<-fimo_matches_tead4_no_ervs_marg_seqs.df %>%
+  makeGRangesFromDataFrame(keep.extra.columns = T, ignore.strand = F, 
+                           starts.in.df.are.0based = F, seqnames.field = 'sequence_name') 
+
+
+fimo_matches_tead4_double_no_ervs_marg_seqs.df<-readr::read_tsv('analysis/memesuite/seqlets/marg_tead4double/fimo_matches_tead4_double_no_ervs_marg_seqs.tsv')
+fimo_matches_tead4_double_no_ervs_marg_seqs.gr<-fimo_matches_tead4_double_no_ervs_marg_seqs.df %>%
+  makeGRangesFromDataFrame(keep.extra.columns = T, ignore.strand = F, 
+                           starts.in.df.are.0based = F, seqnames.field = 'sequence_name') 
+
+
+fimo_matches_tead4_double_no_ervs_marg_seqs.gr$motif_id <- 'tead4_double'
+fimo_matches_tead4_no_ervs_marg_seqs.gr$motif_id <- 'tead4'
+
+fimo_matches_all_no_ervs_marg_seqs.gr <- c(fimo_matches_tead4_double_no_ervs_marg_seqs.gr, fimo_matches_tead4_no_ervs_marg_seqs.gr)
+
+fimo_matches_all_no_ervs_marg_seqs.df <- as.data.frame(fimo_matches_all_no_ervs_marg_seqs.gr)
+
+ov<-findOverlaps(fimo_matches_all_no_ervs_marg_seqs.gr, regions.gr, ignore.strand = T)
+ov<-ov[!duplicated(ov@from)]
+
+fimo_matches_all_no_ervs_marg_seqs.df<-fimo_matches_all_no_ervs_marg_seqs.df[ov@from,]
+fimo_matches_all_no_ervs_marg_seqs.df<-fimo_matches_all_no_ervs_marg_seqs.df %>% dplyr::mutate(peak_region_id = ov@to)
+print(fimo_matches_all_no_ervs_marg_seqs.df %>% dim)
+#44662    12
+
+#Remove duplicates as there are many motifs likely to be palindromic
+fimo_matches_all_no_ervs_marg_seqs.gr<-lapply(fimo_matches_all_no_ervs_marg_seqs.gr$motif_id %>% unique, function(x){
+  gr<-remove_palindromic_motifs_from_bpnet_instances(fimo_matches_all_no_ervs_marg_seqs.df, x, 
+                                                         chrom_name = 'seqnames', 
+                                                         start_name = 'start', 
+                                                         end_name = 'end',
+                                                         value_name = 'score',
+                                                         motif_name = 'motif_id',
+                                                         region_name = 'peak_region_id',
+                                                         starts.in.df.are.0based = F)
+}) %>% as('GRangesList') %>% unlist()
+fimo_matches_all_no_ervs_marg_seqs.gr$motif<-fimo_matches_all_no_ervs_marg_seqs.gr$motif_id
+#2228 palindromic motifs removed of 23068
+#79 palindromic motifs removed of 21594
+
+#remove ervs
+fimo_matches_all_no_ervs_marg_seqs_noerv.gr <- fimo_matches_all_no_ervs_marg_seqs.gr[which(!overlapsAny(fimo_matches_all_no_ervs_marg_seqs.gr, erv, ignore.strand=T))]
+fimo_matches_all_no_ervs_marg_seqs_noerv.gr$motif %>% table()
+
+ #    tead4 tead4_double 
+ #      18507        18836 
+
+```
+
+
+# Calculate PWM match score for each motif set
+
+Align PWM assigned coordinates to CWM assigned coordinates manually. 
+
+```{r}
+lapply(names(seqlet_patterns.list), function(x){
+  plot<-rtracklayer::import(seqlet_patterns.list[[x]]) %>%
+    getSeq(bsgenome, ., as.character = T) %>%
+    ggseqlogo(.)
+}) #%>% wrap_plots(ncol = 1) + plot_annotation(title = 'CWM-scan seqlets')
+
+lapply(names(seqlet_patterns.list), function(x){
+  plot<- pwm_defaults.gr %>% plyranges::filter(motif==x) %>%
+    plyranges::arrange(desc(score)) %>%
+    head(n=1000) %>%
+    getSeq(bsgenome, ., as.character = T) %>%
+    ggseqlogo(.)
+})  #wrap_plots(ncol = 1)  + plot_annotation(title = 'PWM-scan raw')
+
+
+pwm_defaults_aligned.gr<-c(
+  pwm_defaults_noerv.gr %>% plyranges::filter(motif=='tead4') %>% GenomicRanges::resize(., 9, 'end'),
+  pwm_defaults_noerv.gr %>% plyranges::filter(motif=='tead4_double') %>% GenomicRanges::resize(., 17, 'center')
+)
+
+
+lapply(names(seqlet_patterns.list), function(x){
+  plot<-pwm_defaults_aligned.gr %>% plyranges::filter(motif==x) %>%
+    plyranges::arrange(desc(score)) %>%
+    head(n=1000) %>%
+    getSeq(bsgenome, ., as.character = T) %>%
+    ggseqlogo(.)
+}) #%>% wrap_plots(ncol = 1)  + plot_annotation(title = 'PWM-scan aligned')
+
+pwm_seqletsource_aligned.gr<-pwm_seqletsource.gr
+
+lapply(names(seqlet_patterns.list), function(x){
+    plot<-pwm_seqletsource_aligned.gr %>% plyranges::filter(motif==x) %>%
+        plyranges::arrange(desc(score)) %>%
+        head(n=1000) %>%
+        getSeq(bsgenome, ., as.character = T) %>%
+        ggseqlogo(.)
+})  #%>% wrap_plots(ncol = 1)  + plot_annotation(title = 'CWM-freq')
+
+
+lapply(names(seqlet_patterns.list), function(x){
+    plot<-fimo_matches_all_no_ervs_marg_seqs.gr %>% plyranges::filter(motif==x) %>%
+        plyranges::arrange(desc(score)) %>%
+        head(n=1000) %>%
+        getSeq(bsgenome, ., as.character = T) %>%
+        ggseqlogo(.)
+})  #%>% wrap_plots(ncol = 1)  + plot_annotation(title = 'marg-cwm-freq')
+
+
+```
+
+# Score all groups of motifs
+
+Once obtained the PWMs from seqlets, remap the scores back.
+
+```{r}
+
+#Reimplement quantile measuring for PWM scanning scores. 
+all_motifs.list<-lapply(meme_patterns.list %>% unlist, function(x){
+  message(x)
+  
+  #Call each set of motifs
+  seqlet.df<-rtracklayer::import(seqlet_patterns.list[[x]]) %>%
+    plyranges::mutate(seq = getSeq(bsgenome, ., as.character = T))
+  #motif_contrib.gr<- motifs_tead4s_noervs.gr %>% plyranges::filter(pattern_name==modisco_patterns_inverse.list[[x]]) %>%
+  motif_contrib.gr<- motifs_tead4s_noervs.gr %>% plyranges::filter(pattern_name == x) %>% unique() %>%
+    plyranges::mutate(seq = getSeq(bsgenome, ., as.character = T))
+  pwm_freq.gr<-pwm_defaults_aligned.gr %>% plyranges::filter(motif == x) %>% unique() %>%
+    plyranges::mutate(seq = getSeq(bsgenome, ., as.character = T))
+  cwm_freq.gr<-pwm_seqletsource_noerv.gr %>% plyranges::filter(motif == x) %>% unique() %>%
+    plyranges::mutate(seq = getSeq(bsgenome, ., as.character = T))
+  marg_cwm_freq.gr<-fimo_matches_all_no_ervs_marg_seqs_noerv.gr%>% plyranges::filter(motif == x) %>% unique() %>%
+    plyranges::mutate(seq = getSeq(bsgenome, ., as.character = T))
+  
+  #Get log2-derived IC
+  ic<-ic.list[[x]]
+  
+  #Get PWM scores
+  message('getting seqlets...')
+  seqlet.df$pwm_match_score<-mclapply(seqlet.df$seq, function(y) get_sequence_ic(ic = ic, seq = y), mc.cores = 8) %>% unlist()
+  message('getting motif_contrib...')
+  motif_contrib.gr$pwm_match_score<-mclapply(motif_contrib.gr$seq, function(y) get_sequence_ic(ic = ic, seq = y), mc.cores = 8) %>% unlist()
+  message('getting freq...')
+  pwm_freq.gr$pwm_match_score<-mclapply(pwm_freq.gr$seq, function(y) get_sequence_ic(ic = ic, seq = y), mc.cores = 8) %>% unlist()
+  cwm_freq.gr$pwm_match_score<-mclapply(cwm_freq.gr$seq, function(y) get_sequence_ic(ic = ic, seq = y), mc.cores = 8) %>% unlist()
+  marg_cwm_freq.gr$pwm_match_score<-mclapply(marg_cwm_freq.gr$seq, function(y) get_sequence_ic(ic = ic, seq = y), mc.cores = 8) %>% unlist()
+  
+  #Get quantiles based on seqlet distributions
+  match_score_dist<-ecdf(seqlet.df$pwm_match_score)
+  
+  seqlet.df$pwm_match_score_q<-match_score_dist(seqlet.df$pwm_match_score)
+  motif_contrib.gr$pwm_match_score_q<-match_score_dist(motif_contrib.gr$pwm_match_score)
+  pwm_freq.gr$pwm_match_score_q<-match_score_dist(pwm_freq.gr$pwm_match_score)
+  cwm_freq.gr$pwm_match_score_q<-match_score_dist(cwm_freq.gr$pwm_match_score)
+  marg_cwm_freq.gr$pwm_match_score_q<-match_score_dist(marg_cwm_freq.gr$pwm_match_score)
+  
+  #Export
+  return(list(seqlet = seqlet.df, cwm_contrib = motif_contrib.gr, pwms = pwm_freq.gr, cwm_freq = cwm_freq.gr,marg_cwm_freq = marg_cwm_freq.gr, match_score_dist = match_score_dist))
+})
+
+names(all_motifs.list)<-meme_patterns.list %>% unlist
+saveRDS(all_motifs.list, 'analysis/all_motifs_with_scores.list.rds')
+
+lapply(all_motifs.list, function(x) lapply(x, function(y) length(y)))
+
+```
+
+# prepering regions
+
+```{r}
+
+# #pwm-freq
+# tead4_double_pwms.gr$dna <- getSeq(BSgenome.Mmusculus.UCSC.mm10, tead4_double_pwms.gr)
+# tead4_pwms.gr$dna <- getSeq(BSgenome.Mmusculus.UCSC.mm10, tead4_pwms.gr)
+
+# ggplot() + geom_logo(as.data.frame(tead4_double_pwms.gr$dna)) + theme_logo()
+# ggplot() + geom_logo(as.data.frame(tead4_pwms.gr$dna)) + theme_logo()
+# 
+# #rev complement
+# test <- tead4_double_pwms.gr$dna
+# test2 <- reverseComplement(test)
+# test2 <- as.data.frame(test2)
+# tead4_double_pwms.gr$dna2 <- test2$x
+# ggplot() + geom_logo(as.data.frame(tead4_double_pwms.gr$dna2)) + theme_logo()
+# 
+# # save tsv
+# readr::write_tsv(as.data.frame(tead4_double_cwms_seqlet.gr), 'heatmap/new_tead4_double_cwms_seqlets.tsv.gz')
+# readr::write_tsv(as.data.frame(tead4_double_cwms.gr), 'heatmap/new_tead4_double_cwms.tsv.gz')
+# 
+# readr::write_tsv(as.data.frame(tead4_cwms_seqlet.gr), 'heatmap/new_tead4_cwms_seqlets.tsv.gz')
+# readr::write_tsv(as.data.frame(tead4_cwms.gr), 'heatmap/new_tead4_cwms.tsv.gz')
+
+# #resizing to predict genomic regions directly 
+# tead4_double_cwms.df <- read_tsv("/n/projects/kd2200/publication/rebuttal/heatmap/new_tead4_double_cwms.tsv.gz")
+# tead4_double_cwms.gr  <- makeGRangesFromDataFrame(tead4_double_cwms.df,starts.in.df.are.0based = F, keep.extra.columns = T)
+# tead4_double_cwms.gr$dna3 <- resize(tead4_double_cwms.gr, 999, "center") %>% getSeq(bsgenome, ., as.character = T)
+# readr::write_tsv(as.data.frame(tead4_double_cwms.gr), '../../rebuttal/heatmap/new_tead4_double_cwms_genomic_seqeunces.tsv.gz')
+# 
+# tead4_cwms.df <- read_tsv("/n/projects/kd2200/publication/rebuttal/heatmap/new_tead4_cwms.tsv.gz")
+# tead4_cwms.gr  <- makeGRangesFromDataFrame(tead4_cwms.df,starts.in.df.are.0based = F, keep.extra.columns = T)
+# tead4_cwms.gr$dna3 <- resize(tead4_cwms.gr, 999, "center") %>% getSeq(bsgenome, ., as.character = T)
+# readr::write_tsv(as.data.frame(tead4_cwms.gr), '../../rebuttal/heatmap/new_tead4_cwms_genomic_seqeunces.tsv.gz')
+# 
+# #pwms
+# readr::write_tsv(as.data.frame(tead4_double_pwms.gr), 'heatmap/new_tead4_double_pwms.tsv.gz')
+# readr::write_tsv(as.data.frame(tead4_pwms.gr), 'heatmap/new_tead4_pwms.tsv.gz')
+# 
+# # original cwm
+# 
+# tead4_double.df <- read_tsv("/n/projects/kd2200/publication/bpnet/cwm_all_regions/tead4/instances_by_pattern/m0_p1_motif-instances-all-regions.tsv.gz")
+# tead4_double.gr <- tead4_double.df %>% makeGRangesFromDataFrame(seqnames.field = "example_chrom",start.field = "pattern_start_abs", end.field = "pattern_end_abs",keep.extra.columns = T, starts.in.df.are.0based = T)
+# tead4_double.gr <- unique(tead4_double.gr)
+# 
+# tead4.df <- read_tsv("/n/projects/kd2200/publication/bpnet/cwm_all_regions/tead4/instances_by_pattern/m0_p0_motif-instances-all-regions.tsv.gz")
+# tead4.gr <- tead4.df %>% makeGRangesFromDataFrame(seqnames.field = "example_chrom",start.field = "pattern_start_abs", end.field = "pattern_end_abs",keep.extra.columns = T, starts.in.df.are.0based = T)
+# tead4.gr <- unique(tead4.gr)
+# 
+# #erv
+# rm <- readRDS("/n/projects/mw2098/genomes/mm10/repeatmasker.mm10.gr.rds")
+# erv <- rm[grep("ERV", rm$repeat_class)]
+# 
+# tead4_double_noerv.gr <- tead4_double.gr[which(!overlapsAny(tead4_double.gr, erv, ignore.strand=T))]
+# tead4_noerv.gr <- tead4.gr[which(!overlapsAny(tead4.gr, erv, ignore.strand=T))]
+# 
+# # remove palindormic
+# tead4_double_noerv.gr$pattern_name <- "tead4_double"
+# tead4_double_noerv.gr <- remove_palindromic_motifs_from_bpnet_instances(tead4_double_noerv.gr , pattern_to_filter="tead4_double")
+# 
+# tead4_noerv.gr$pattern_name <- "tead4"
+# tead4_noerv.gr <- remove_palindromic_motifs_from_bpnet_instances(tead4_noerv.gr , pattern_to_filter="tead4")
+# 
+# #getseq
+# tead4_noerv.gr$dna <- as.data.frame(getSeq(BSgenome.Mmusculus.UCSC.mm10,  tead4_noerv.gr))
+# tead4_double_noerv.gr$dna <- as.data.frame(getSeq(BSgenome.Mmusculus.UCSC.mm10,tead4_double_noerv.gr))
+# 
+# ggplot() + geom_logo(tead4_noerv.gr$dna) + theme_logo()
+# ggplot() + geom_logo(tead4_double_noerv.gr$dna) + theme_logo()
+# 
+# readr::write_tsv(as.data.frame(tead4_noerv.gr), 'tsv/new_tead4_noerv.tsv.gz')
+# readr::write_tsv(as.data.frame(tead4_double_noerv.gr), 'tsv/new_tead4_double_noerv.tsv.gz')
+# 
+
+```
+
+# heatmaps
+
+```{r}
+
+nexus.bw.list<-list(tead4 = list(pos = '/n/projects/kd2200/publication/data_preparation/bw/mm10/nexus/combined/mtsc_tead4_nexus_combined_normalized_positive.bw',
+                                        neg = '/n/projects/kd2200/publication/data_preparation/bw/mm10/nexus/combined/mtsc_tead4_nexus_combined_normalized_negative.bw'))
+
+
+# tead4 double
+tead4_double_cwms.gr<-all_motifs.list$tead4_double$cwm_contrib
+tead4_double_pwms.gr<-all_motifs.list$tead4_double$pwms
+
+# # Filter out PWM motif mappings that did not adhere to original regions, as this isn't a fair comparison
+island_regions<-regions.path %>% rtracklayer::import(.) 
+tead4_double_cwms.gr <- tead4_double_cwms.gr %>% plyranges::filter(overlapsAny(., island_regions, ignore.strand = T))
+tead4_double_pwms.gr <- tead4_double_pwms.gr %>% plyranges::filter(overlapsAny(., island_regions, ignore.strand = T))
+
+#calculate signal to order
+tead4_double_cwms.gr$signal <- nexus_regionSums(resize(tead4_double_cwms.gr, 51, "center"), nexus.bw.list$tead4)
+tead4_double_pwms.gr$signal <- nexus_regionSums(resize(tead4_double_pwms.gr, 51, "center"), nexus.bw.list$tead4)
+
+#order
+tead4_double_cwms.gr <- tead4_double_cwms.gr[order(tead4_double_cwms.gr$signal,decreasing = T)]
+tead4_double_pwms.gr <- tead4_double_pwms.gr[order(tead4_double_pwms.gr$signal,decreasing = T)]
+
+tead4_double_cwms.gr <- tead4_double_cwms.gr[1:5699]#6699
+tead4_double_pwms.gr <- tead4_double_pwms.gr[1:9569]#10569
+
+#reverse strand
+tead4_double_cwms_rev.gr <- tead4_double_cwms.gr
+strand(tead4_double_cwms_rev.gr) <- ifelse(strand(tead4_double_cwms_rev.gr) == "+", "-", "+")
+tead4_double_pwms_rev.gr <- tead4_double_pwms.gr
+strand(tead4_double_pwms_rev.gr) <- ifelse(strand(tead4_double_pwms_rev.gr) == "+", "-", "+")
+
+tead4_double_cwms_rev.gr <- tead4_double_cwms_rev.gr[order(tead4_double_cwms_rev.gr$signal,decreasing = F)]
+tead4_double_pwms_rev.gr  <- tead4_double_pwms_rev.gr [order(tead4_double_pwms_rev.gr$signal,decreasing = F)]
+#plot
+tead4_motifs <- list(cwm=tead4_double_cwms_rev.gr,pwm =tead4_double_pwms_rev.gr)
+plot_multiple_gr_nexus_heatmap(tead4_motifs, sample = nexus.bw.list$tead4, order = "as.is",upstream = 51, downstream = 50, title = "Tead4 double motifs",ncol = 2,removal_threshold = 0)
+
+# # tead4 single
+tead4_cwms.gr<-all_motifs.list$tead4$cwm_contrib
+tead4_pwms.gr<-all_motifs.list$tead4$pwms
+
+
+# # Filter out PWM motif mappings that did not adhere to original regions, as this isn't a fair comparison
+island_regions<-regions.path %>% rtracklayer::import(.) 
+tead4_cwms.gr <- tead4_cwms.gr %>% plyranges::filter(overlapsAny(., island_regions, ignore.strand = T))
+tead4_pwms.gr <- tead4_pwms.gr %>% plyranges::filter(overlapsAny(., island_regions, ignore.strand = T))
+
+#calculate signal to order
+tead4_cwms.gr$signal <- nexus_regionSums(resize(tead4_cwms.gr, 51, "center"), nexus.bw.list$tead4)
+tead4_pwms.gr$signal <- nexus_regionSums(resize(tead4_pwms.gr, 51, "center"), nexus.bw.list$tead4)
+
+#order
+tead4_cwms.gr <- tead4_cwms.gr[order(tead4_cwms.gr$signal,decreasing = T)]
+tead4_pwms.gr <- tead4_pwms.gr[order(tead4_pwms.gr$signal,decreasing = T)]
+
+tead4_cwms.gr <- tead4_cwms.gr[1:40374]#45374
+tead4_pwms.gr <- tead4_pwms.gr[1:11173]#16173
+
+#reverse strand
+tead4_cwms_rev.gr <- tead4_cwms.gr
+strand(tead4_cwms_rev.gr) <- ifelse(strand(tead4_cwms_rev.gr) == "+", "-", "+")
+tead4_pwms_rev.gr <- tead4_pwms.gr
+strand(tead4_pwms_rev.gr) <- ifelse(strand(tead4_pwms_rev.gr) == "+", "-", "+")
+
+tead4_cwms_rev.gr <- tead4_cwms_rev.gr[order(tead4_cwms_rev.gr$signal,decreasing = F)]
+tead4_pwms_rev.gr  <- tead4_pwms_rev.gr [order(tead4_pwms_rev.gr$signal,decreasing = F)]
+#plot
+tead4_s_motifs <- list(cwm=tead4_cwms_rev.gr,pwm =tead4_pwms_rev.gr)
+plot_multiple_gr_nexus_heatmap(tead4_s_motifs, sample = nexus.bw.list$tead4, order = "as.is",upstream = 51, downstream = 50, title = "Tead4 single motifs",ncol = 2,removal_threshold = 0)
+
+```
+  
+# marginalization tead4 double
+```{r,eval=FALSE}
+cwm_contrib <-all_motifs.list$tead4_double$cwm_contrib
+pwm_freq<-all_motifs.list$tead4_double$pwms  
+cwm_freq <-all_motifs.list$tead4_double$cwm_freq
+marg_cwm_freq <-all_motifs.list$tead4_double$marg_cwm_freq
+
+
+#annotate
+cwm_contrib$category <- "cwm_contrib"
+pwm_freq$category <- "pwm_freq"
+cwm_freq$category <- "cwm_freq"
+marg_cwm_freq$category <- "marg_cwm_freq"
+
+
+#reverse complement
+pwm_freq$dna <- getSeq(bsgenome, pwm_freq)
+test <-pwm_freq$dna
+test2 <- reverseComplement(test)
+test2 <- as.data.frame(test2)
+pwm_freq$dna2 <- test2$x
+ggplot() + geom_logo(as.data.frame(pwm_freq$dna2)) + theme_logo()   
+
+
+cwm_freq$dna <- getSeq(bsgenome, cwm_freq)
+test <-cwm_freq$dna
+test2 <- reverseComplement(test)
+test2 <- as.data.frame(test2)
+cwm_freq$dna2 <- test2$x
+ggplot() + geom_logo(as.data.frame(cwm_freq$dna2)) + theme_logo() 
+
+ggplot() + geom_logo(as.data.frame(marg_cwm_freq$seq)) + theme_logo()
+marg_cwm_freq$dna2 <- marg_cwm_freq$seq
+
+#order
+cwm_contrib<- cwm_contrib[order(cwm_contrib$pwm_match_score,decreasing = T)]
+pwm_freq<- pwm_freq[order(pwm_freq$pwm_match_score,decreasing = T)]
+cwm_freq<- cwm_freq[order(cwm_freq$pwm_match_score,decreasing = T)]
+marg_cwm_freq<- marg_cwm_freq[order(marg_cwm_freq$pwm_match_score,decreasing = T)]
+
+cwm_contrib_sel <- cwm_contrib[1:5000]
+pwm_freq_sel<- pwm_freq[1:5000]
+cwm_freq_sel<- cwm_freq[1:5000]
+marg_cwm_freq_sel<- marg_cwm_freq[1:5000]
+
+cwm_contrib_sel_context <- cwm_contrib_sel
+cwm_contrib_sel_context$dna3 <- resize(cwm_contrib_sel_context, 999, "center") %>% getSeq(bsgenome, ., as.character = T)
+
+
+# save tsv
+readr::write_tsv(as.data.frame(cwm_contrib_sel), 'analysis/tsv/cwm_contrib_sel.tsv.gz')
+readr::write_tsv(as.data.frame(pwm_freq_sel), 'analysis/tsv/pwm_freq_sel.tsv.gz')
+readr::write_tsv(as.data.frame(cwm_freq_sel), 'analysis/tsv/cwm_freq_sel.tsv.gz')
+readr::write_tsv(as.data.frame(marg_cwm_freq_sel), 'analysis/tsv/marg_cwm_freq_sel.tsv.gz')
+readr::write_tsv(as.data.frame(cwm_contrib_sel_context), 'analysis/tsv/cwm_contrib_sel_context.tsv.gz')
+
+
+cwm_contrib.df <-read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/cwm_contrib_sel.csv')
+cwm_contrib_context.df <-read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/cwm_contrib_sel_context.csv')
+pwm_freq.df <- read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/pwm_freq_sel.csv')
+td_cwm_freq.df <- read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/cwm_freq_sel.csv')
+#marg_freq.df <- read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/marg_cwm_freq_sel.csv')
+
+ggplot() +
+    geom_density(data = cwm_contrib.df, aes(x = tead4), fill = "#8E68AD", alpha = 0.5,position = "identity",adjust = 1.5)+   
+    geom_density(data = cwm_contrib_context.df, aes(x = tead4), fill = "red", alpha = 0.5,position = "identity",adjust = 1.5)+  
+    geom_density(data = td_cwm_freq.df, aes(x = tead4), fill = "#f8c42d", alpha = 0.5,position = "identity",adjust = 1.5)+
+    geom_density(data = pwm_freq.df , aes(x = tead4), fill = "#34A549", alpha = 0.5,position = "identity",adjust = 1.5) +
+    labs(title = "Density Plot of tead4 double signal",
+         x = "Tead4 signal",
+         y = "Density") +scale_x_continuous(limits = c(0, 120), breaks = seq(0, 120, by = 20)) +
+    theme_classic()
+
+
+
+```
+
+#marginalaiization of tead4 single
+```{r,marginalization of tead4 single, eval=FALSE}
+
+cwm_contrib <-all_motifs.list$tead4$cwm_contrib
+pwm_freq<-all_motifs.list$tead4$pwms  
+cwm_freq <-all_motifs.list$tead4$cwm_freq
+marg_cwm_freq <-all_motifs.list$tead4$marg_cwm_freq
+
+
+#annotate
+cwm_contrib$category <- "cwm_contrib"
+pwm_freq$category <- "pwm_freq"
+cwm_freq$category <- "cwm_freq"
+marg_cwm_freq$category <- "marg_cwm_freq"
+
+
+#reverse complement
+pwm_freq$dna <- getSeq(bsgenome, pwm_freq)
+test <-pwm_freq$dna
+test2 <- reverseComplement(test)
+test2 <- as.data.frame(test2)
+pwm_freq$dna2 <- test2$x
+ggplot() + geom_logo(as.data.frame(pwm_freq$dna2)) + theme_logo()   
+
+
+cwm_freq$dna <- getSeq(bsgenome, cwm_freq)
+test <-cwm_freq$dna
+test2 <- reverseComplement(test)
+test2 <- as.data.frame(test2)
+cwm_freq$dna2 <- test2$x
+ggplot() + geom_logo(as.data.frame(cwm_freq$dna2)) + theme_logo() 
+
+ggplot() + geom_logo(as.data.frame(marg_cwm_freq$seq)) + theme_logo()
+marg_cwm_freq$dna2 <- marg_cwm_freq$seq
+
+#order
+cwm_contrib<- cwm_contrib[order(cwm_contrib$pwm_match_score,decreasing = T)]
+pwm_freq<- pwm_freq[order(pwm_freq$pwm_match_score,decreasing = T)]
+cwm_freq<- cwm_freq[order(cwm_freq$pwm_match_score,decreasing = T)]
+marg_cwm_freq<- marg_cwm_freq[order(marg_cwm_freq$pwm_match_score,decreasing = T)]
+
+cwm_contrib_sel <- cwm_contrib[1:20000]#49606 
+pwm_freq_sel<- pwm_freq[1:20000]#24760 
+cwm_freq_sel<- cwm_freq[1:20000]#21550
+#marg_cwm_freq_sel<- marg_cwm_freq[1:18507]#18507
+
+cwm_contrib_sel_context <- cwm_contrib_sel
+cwm_contrib_sel_context$dna3 <- resize(cwm_contrib_sel_context, 999, "center") %>% getSeq(bsgenome, ., as.character = T)
+
+
+# save tsv
+readr::write_tsv(as.data.frame(cwm_contrib_sel), 'analysis/tsv/td_cwm_contrib_sel.tsv.gz')
+readr::write_tsv(as.data.frame(pwm_freq_sel), 'analysis/tsv/td_pwm_freq_sel.tsv.gz')
+readr::write_tsv(as.data.frame(cwm_freq_sel), 'analysis/tsv/td_cwm_freq_sel.tsv.gz')
+readr::write_tsv(as.data.frame(marg_cwm_freq_sel), 'analysis/tsv/td_marg_cwm_freq_sel.tsv.gz')
+readr::write_tsv(as.data.frame(cwm_contrib_sel_context), 'analysis/tsv/td_cwm_contrib_sel_context.tsv.gz')
+
+
+td_cwm_contrib.df <-read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/td_cwm_contrib_sel.csv')
+td_cwm_contrib_context.df <-read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/td_cwm_contrib_sel_context.csv')
+td_pwm_freq.df <- read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/td_pwm_freq_sel.csv')
+td_cwm_freq.df <- read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/td_cwm_freq_sel.csv')
+#td_marg.df <- read_csv('/n/projects/kd2200/publication/rebuttal/analysis/csv/td_marg_cwm_freq_sel.csv')
+
+ggplot() +
+  geom_density(data = td_cwm_contrib.df, aes(x = tead4), fill = "#8E68AD", alpha = 0.5,position = "identity",adjust = 1.5)+   
+  geom_density(data = td_cwm_contrib_context.df, aes(x = tead4), fill = "red", alpha = 0.5,position = "identity",adjust = 1.5)+  
+  geom_density(data = td_cwm_freq.df, aes(x = tead4), fill = "#f8c42d", alpha = 0.5,position = "identity",adjust = 1.5)+
+  geom_density(data = td_pwm_freq.df , aes(x = tead4), fill = "#34A549", alpha = 0.5,position = "identity",adjust = 1.5) +
+  labs(title = "Density Plot of tead4 single signal",
+       x = "Tead4 signal",
+       y = "Density")+scale_x_continuous(limits = c(0, 120), breaks = seq(0, 120, by = 20)) +
+  theme_classic()
+
+
+```
+
+#homer logo reverse complement
+
+```{r, command to run homer,eval=FALSE}
+peaks.gr <- import.bed("/n/projects/kd2200/publication/bpnet_prep/macs2/combined/mtsc_tead4_nexus_summits.bed")
+peaks.gr <- keepStandardChromosomes(peaks.gr, pruning.mode = "coarse")
+peaks.gr<-peaks.gr[order(peaks.gr$score, decreasing = TRUE)][1:1000]
+peaks_resize.gr<- resize(peaks.gr, 200,"center")
+export.bed(peaks_resize.gr, "homer_peakanalysis/mtsc_tead4_nexus_summits_top1000_resized_200bp_center.bed")
+peaks_resize.gr
+
+
+#de novo motifs
+#findMotifsGenome.pl homer_peakanalysis/mtsc_tead4_nexus_summits_top1000_resized_200bp_center_new.bed /n/projects/kd2200/analysis/BPNet/cegkttyz_tsc_bpnet/tsc_model_morval_idr_peaks_morereps_wotead4/bpnet/fasta/mm10.fa homer_peakanalysis -size 200 -len 9,13,18,20 -preparsedDir parsing_genome_dir -p 8
+```
+
+```{r,homer logo}
+#test <- read_tsv("/n/projects/kd2200/publication/rebuttal/homer_peakanalysis/homerResults/motif1.similar4.motif")
+test <- read_tsv("/n//projects/kd2200/publication/rebuttal/homer_peakanalysis/test_with_101bp/homer_analysis_101/homerResults/motif1.similar5.motif")
+library(Biostrings)
+# pwm_matrix <- matrix(c(
+#     0.165, 0.439, 0.297, 0.280, 0.442, 0.812, 0.001, 0.001, 0.046, 0.099, 0.469, 0.266, 0.105, 0.620, 0.935, 0.003, 0.007, 0.036,  # A
+#     0.422, 0.099, 0.102, 0.119, 0.356, 0.076, 0.046, 0.171, 0.650, 0.564, 0.043, 0.001, 0.112, 0.218, 0.036, 0.036, 0.053, 0.488,  # C
+#     0.264, 0.155, 0.518, 0.552, 0.063, 0.056, 0.059, 0.392, 0.053, 0.129, 0.109, 0.732, 0.782, 0.066, 0.026, 0.007, 0.557, 0.053,  # G
+#     0.148, 0.307, 0.083, 0.049, 0.139, 0.056, 0.894, 0.435, 0.251, 0.208, 0.380, 0.001, 0.001, 0.096, 0.003, 0.954, 0.383, 0.422   # T
+# ), nrow = 4, byrow = TRUE)
+
+pwm_matrix <- matrix(c(
+    0.550, 0.230, 0.997, 0.001, 0.256, 0.026, 0.076, 0.192, 0.205, 0.346, 0.231, 0.975, 0.025, 0.244, 0.013, 0.038, 0.154, 0.102,  # A
+    0.026, 0.768, 0.001, 0.001, 0.013, 0.680, 0.564, 0.180, 0.282, 0.128, 0.640, 0.012, 0.001, 0.064, 0.795, 0.577, 0.154, 0.269,  # C
+    0.334, 0.001, 0.001, 0.001, 0.052, 0.205, 0.001, 0.064, 0.346, 0.474, 0.128, 0.012, 0.012, 0.128, 0.166, 0.001, 0.039, 0.411,  # G
+    0.090, 0.001, 0.001, 0.997, 0.679, 0.089, 0.359, 0.564, 0.167, 0.052, 0.001, 0.001, 0.962, 0.564, 0.026, 0.384, 0.653, 0.218   # T
+), nrow = 4, byrow = TRUE)
+
+# Assign nucleotide row names
+rownames(pwm_matrix) <- c("A", "C", "G", "T")
+
+# Reverse complement the PWM
+# reverse_complement_pwm <- function(pwm) {
+#     # Reverse the columns
+#     reversed_pwm <- pwm[, ncol(pwm):1]
+#     
+#     # Swap rows for A<->T and C<->G
+#     reversed_pwm[c("A", "T"), ] <- reversed_pwm[c("T", "A"), ]
+#     reversed_pwm[c("C", "G"), ] <- reversed_pwm[c("G", "C"), ]
+#     
+#     return(reversed_pwm)
+# }
+# 
+# # Apply the reverse complement function
+# pwm_rc <- reverse_complement_pwm(pwm_matrix)
+# 
+
+# Plot 
+ggplot() +
+    geom_logo(pwm_matrix) +
+    theme_logo() +
+    ggtitle("PWM Sequence Logo")
+```
+
+```{r, meme logo}
+zoops_meme <- read_table("/n/projects/kd2200/publication/rebuttal/analysis/zoops_meme_seqs.txt")
+zoops_meme_1 <- DNAStringSet(zoops_meme$seq)
+zoops_meme_rev <- Biostrings::reverseComplement(zoops_meme_1)
+ggplot() + geom_logo(as.data.frame(zoops_meme_rev)) + theme_logo()  
+
+
+anr_meme <- read_table("/n/projects/kd2200/publication/rebuttal/analysis/anr_meme_seqs.txt")
+anr_meme_1 <- DNAStringSet(anr_meme$seq)
+anr_meme_rev <- Biostrings::reverseComplement(anr_meme_1)
+ggplot() + geom_logo(as.data.frame(anr_meme_rev)) + theme_logo() 
+```
+
+```{r, heatmap statistics,eval=FALSE}
+
+all_tf_final_no_promoter.gr<-readr::read_tsv("/n/projects/kd2200/publication/bpnet/analysis/tsv/all_tfregions_with_binding_activity.tsv") %>% makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based =F)
+
+#from island analysis in rmd 5.Tead4 anf Yap1 analysis
+tead4_tfap2c_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Tead4-1_Tfap2c-1")
+td.gr <-tead4_tfap2c_1 %>% subset(tf == "Tead4")
+tf.gr <- tead4_tfap2c_1 %>% subset(tf== "Tfap2c")
+
+t <- distanceToNearest(td.gr, tf.gr)
+g <- t@elementMetadata
+s <- g$distance<=160
+s <- t[s]
+td_tf <-tead4_tfap2c_1[s@from]
+td_tf$td_tf_motif_dis <- s@elementMetadata
+td_tf <- td_tf[order(td_tf$td_tf_motif_dis, decreasing = F)]
+
+#check motif
+tf.gr$seq <- getSeq(bsgenome, tf.gr, as.character = T)
+ggplot() + geom_logo(tf.gr$seq) + theme_logo()    
+
+#overlap with tfpa2c motifs
+q <- find_overlaps(tf.gr, td_tf , maxgap = 150)   
+q$seq <- getSeq(bsgenome, q, as.character = T)
+ggplot() + geom_logo(q$seq) + theme_logo()
+q$contrib_yap1_attf_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q$contrib_tfap2c_attf_motif <- regionSums(q, tsc.contrib.profile.bws$tfap2c)
+q$contrib_tead4_attf_motif <- regionSums(q, tsc.contrib.profile.bws$tead4)
+q.df <- as.data.frame(q)
+
+
+#linear model
+lm_model <- lm(contrib_yap1_attf_motif ~ distance, data=q.df)  
+summary(lm_model)
+
+#lm_model <- lm(contrib_tfap2c_attf_motif ~ distance, data=q.df)  
+#summary(lm_model)
+
+#lm_model <- lm(contrib_tead4_attf_motif ~ distance, data=q.df)  
+#summary(lm_model)
+
+# Call:
+# lm(formula = contrib_yap1_attf_motif ~ distance, data = q.df)
+# 
+# Residuals:
+#      Min       1Q   Median       3Q      Max 
+# -0.22877 -0.07557 -0.01139  0.05788  0.42051 
+# 
+# Coefficients:
+#               Estimate Std. Error t value Pr(>|t|)    
+# (Intercept)  2.074e-01  4.250e-03   48.80   <2e-16 ***
+# distance    -8.633e-04  5.852e-05  -14.75   <2e-16 ***
+# ---
+# Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+# 
+# Residual standard error: 0.1007 on 1551 degrees of freedom
+# Multiple R-squared:  0.1231,	Adjusted R-squared:  0.1225 
+# F-statistic: 217.6 on 1 and 1551 DF,  p-value: < 2.2e-16
+
+
+
+# q.df$binned_distance <- cut(q.df$distance, breaks=seq(min(q.df$distance), max(q.df$distance), by=10), include.lowest=TRUE, labels=FALSE)
+#   
+#     binned_data <- q.df %>%
+#     group_by(binned_distance) %>%
+#     summarize(mean_contrib = mean(contrib_yap1_attf_motif, na.rm = TRUE))
+#   lm_model <- lm(mean_contrib ~ binned_distance, data=binned_data)  
+#   summary(lm_model)
+  
+  # ggplot(binned_data, aes(x = binned_distance, y = mean_contrib)) +
+  #   geom_bar(stat = "identity", fill = "blue", alpha = 0.7) +  # Bar plot for the mean contribution
+  #   geom_smooth(method = "loess", color = "red", se = FALSE, linetype = "dashed") +  # Smoothed trend line
+  #   coord_flip() +
+  #   theme_minimal() +
+  #   ylab("Mean Motif Contribution") +
+  #   xlab("Row Bins (10 rows each)") +
+  #   ggtitle("Binned Plot for TFAP2C Contribution")
+
+ #for cdx2  
+
+tead4_cdx2_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Cdx2-1_Tead4-1")
+td.gr <-tead4_cdx2_1 %>% subset(tf == "Tead4")
+cd.gr <- tead4_cdx2_1 %>% subset(tf== "Cdx2")
+
+t <- distanceToNearest(td.gr, cd.gr)
+g <- t@elementMetadata
+s <- g$distance<=160
+s <- t[s]
+td_cd <-td.gr[s@from]
+td_cd$td_tf_motif_dis <- s@elementMetadata
+td_cd <- td_cd[order(td_cd$td_tf_motif_dis, decreasing = F)]
+#cd.gr$seq <- getSeq(bsgenome, cd.gr, as.character = T)
+#ggplot() + geom_logo(cd.gr$seq) + theme_logo()    
+
+
+q <- find_overlaps(cd.gr, td_cd, maxgap = 150)   
+q$seq <- getSeq(bsgenome, q, as.character = T)
+ggplot() + geom_logo(q$seq) + theme_logo()
+q$contrib_yap1_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q$contrib_tead4_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$tead4)
+q$contrib_cdx2_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$cdx2)
+q.df <- as.data.frame(q)
+lm_model <- lm(contrib_yap1_atcd_motif ~ distance, data=q.df)  
+summary(lm_model)
+
+  
+  
+## for tead4_double
+
+tead4double_tfap2c_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Tead4_double-1_Tfap2c-1")
+tdbl.gr <-tead4double_tfap2c_1 %>% subset(tf == "Tead4_double")
+tf.gr <- tead4double_tfap2c_1 %>% subset(tf== "Tfap2c")
+
+t <- distanceToNearest(tdbl.gr, tf.gr)
+g <- t@elementMetadata
+s <- g$distance<=160
+s <- t[s]
+tdbl_tf <- tdbl.gr[s@from]
+tdbl_tf$td_tf_motif_dis <- s@elementMetadata
+tdbl_tf <- tdbl_tf[order(tdbl_tf$td_tf_motif_dis, decreasing = F)]
+
+tf.gr$seq <- getSeq(bsgenome,  tf.gr, as.character = T)
+ggplot() + geom_logo(tf.gr$seq) + theme_logo()    
+
+
+q <- find_overlaps( tf.gr, tdbl_tf, maxgap = 150)   
+q$seq <- getSeq(bsgenome, q, as.character = T)
+ggplot() + geom_logo(q$seq) + theme_logo()
+q$contrib_yap1_attf_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q.df <- as.data.frame(q)
+
+
+q.df$binned_distance <- cut(q.df$distance, breaks=seq(min(q.df$distance), max(q.df$distance), by=10), include.lowest=TRUE, labels=FALSE)
+
+binned_data <- q.df %>%
+    group_by(binned_distance) %>%
+    summarize(mean_contrib = mean(contrib_yap1_attf_motif, na.rm = TRUE))
+lm_model <- lm(mean_contrib ~ binned_distance, data=binned_data)  
+summary(lm_model)
+
+
+
+## for gata3
+
+tead4_gata3_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Gata3-1_Tead4-1")
+td.gr <- tead4_gata3_1 %>% subset(tf == "Tead4")
+gat.gr <- tead4_gata3_1 %>% subset(tf== "Gata3")
+
+t <- distanceToNearest(td.gr, gat.gr)
+g <- t@elementMetadata
+s <- g$distance<=160
+s <- t[s]
+td_gt <-tead4_gata3_1[s@from]
+td_gt$td_gt_motif_dis <- s@elementMetadata
+td_gt <- td_gt[order(td_gt$td_gt_motif_dis, decreasing = F)]
+
+gat.gr$seq <- getSeq(bsgenome, gat.gr, as.character = T)
+ggplot() + geom_logo(gat.gr$seq) + theme_logo()    
+
+
+q <- find_overlaps( gat.gr, td_gt, maxgap = 150)   
+q$seq <- getSeq(bsgenome, q, as.character = T)
+ggplot() + geom_logo(q$seq) + theme_logo()
+q$contrib_yap1_atgat_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q.df <- as.data.frame(q)
+
+
+q.df$binned_distance <- cut(q.df$distance, breaks=seq(min(q.df$distance), max(q.df$distance), by=10), include.lowest=TRUE, labels=FALSE)
+
+binned_data <- q.df %>%
+    group_by(binned_distance) %>%
+    summarize(mean_contrib = mean(contrib_yap1_atgat_motif, na.rm = TRUE))
+lm_model <- lm(mean_contrib ~ binned_distance, data=binned_data)  
+summary(lm_model)
+
+    
+```
+
+#making graph 
+```{r,eval=FALSE}
+
+tead4_tfap2c_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Tead4-1_Tfap2c-1")
+td.gr <-tead4_tfap2c_1 %>% subset(tf == "Tead4")
+tf.gr <- tead4_tfap2c_1 %>% subset(tf== "Tfap2c")
+
+t <- distanceToNearest(td.gr, tf.gr)
+g <- t@elementMetadata
+s <- g$distance<=500
+s <- t[s]
+td_tf <-tead4_tfap2c_1[s@from]
+td_tf$td_tf_motif_dis <- s@elementMetadata
+td_tf <- td_tf[order(td_tf$td_tf_motif_dis, decreasing = F)]
+td_tf$yap1_contrib_at_tfap2c <- regionSums(td_tf, tsc.contrib.profile.bws$yap1) 
+
+#tf.gr$seq <- getSeq(bsgenome, tf.gr, as.character = T)
+#ggplot() + geom_logo(tf.gr$seq) + theme_logo()    
+
+q <- find_overlaps(tf.gr, td_tf , maxgap = 500)   
+q$seq <- getSeq(bsgenome, q, as.character = T)
+ggplot() + geom_logo(q$seq) + theme_logo()
+q$contrib_yap1_attf_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q$contrib_tead4_attf_motif <- regionSums(q, tsc.contrib.profile.bws$tead4)
+q.df <- as.data.frame(q)
+  
+  # Ensure >150bp group is included and then summarize
+  binned_data <- q.df %>%
+    mutate(binned_distance = cut(distance, breaks = c(-Inf, 35, 75, 150, Inf), 
+                                 labels = c("<35bp", "35-75bp", "75-150bp", ">150bp"))) %>%
+    group_by(binned_distance) %>%
+    summarize(median_contrib = median(contrib_yap1_attf_motif, na.rm = TRUE))
+  
+  # Find the median contribution for the >150bp group
+  baseline_median <- binned_data %>% 
+    filter(binned_distance == ">150bp") %>% 
+    pull(median_contrib)
+  
+  # Calculate the log ratio relative to the baseline
+  binned_data <- binned_data %>%
+    mutate(log_ratio = log2(median_contrib / baseline_median))
+  
+  
+  # # Plot the data
+  # ggplot(binned_data, aes(x = binned_distance, y = log_ratio, fill = log_ratio)) +
+  #   geom_bar(stat = "identity", color = "black", width = 0.6) +
+  #   scale_fill_gradient2(low = "white", mid = "blue", high = "red", 
+  #                        midpoint = 0, limits = c(min(binned_data$log_ratio), max(binned_data$log_ratio))) +
+  #   labs(title = "Log Ratio of Median YAP1 Contribution at TFAP2C Motif by Binned Distance",
+  #        x = "Binned Distance",
+  #        y = "Log Ratio of Median Contribution") +
+  #   theme_minimal()
+  
+  
+  # Create the plot
+  ggplot(binned_data, aes(x = binned_distance, y = log_ratio, fill = log_ratio)) +
+    geom_bar(stat = "identity", color = "black", width = 0.6) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+                         midpoint = 0, limits = c(0, 1.5),  # Adjust limits to match your data range
+                         breaks = seq(0, 1.5, by = 0.25))+  # Adjust breaks for the color legend
+    theme_minimal() +
+    labs(title = "Log Ratio of Median YAP1 Contribution at TFAP2C Motif by Binned Distance", 
+         x = "Binned Distance (bp)", 
+         y = "Log Ratio of median Yap1 contribution", 
+         fill = "Log ratio") +
+    theme(legend.position = "top",
+          legend.title = element_text(size = 10, face = "bold"),
+          legend.text = element_text(size = 9),
+          axis.title.x = element_text(size = 10, face = "bold"),
+          axis.title.y = element_text(size = 10, face = "bold"),
+          axis.text.x = element_text(size = 9),
+          axis.text.y = element_text(size = 9)) +
+    scale_y_continuous(breaks = seq(0, 1.5, by = 0.25), limits = c(0, 1.5))
+  
+
+## cdx2
+  
+tead4_cdx2_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Cdx2-1_Tead4-1")
+td.gr <-tead4_cdx2_1 %>% subset(tf == "Tead4")
+cd.gr <- tead4_cdx2_1 %>% subset(tf== "Cdx2")
+
+t <- distanceToNearest(td.gr, cd.gr)
+g <- t@elementMetadata
+s <- g$distance<=200 #keeping 200 for cdx2 only as 500 boosts shorter range
+s <- t[s]
+td_cd <-td.gr[s@from]
+td_cd$td_tf_motif_dis <- s@elementMetadata
+td_cd <- td_cd[order(td_cd$td_tf_motif_dis, decreasing = F)]
+ 
+
+
+q <- find_overlaps(cd.gr, td_cd, maxgap = 200)   
+
+q$contrib_yap1_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q$contrib_tead4_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$tead4)
+q$contrib_cdx2_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$cdx2)
+q.df <- as.data.frame(q)
+  # Ensure >150bp group is included and then summarize
+  binned_data <- q.df %>%
+    mutate(binned_distance = cut(distance, breaks = c(-Inf, 35, 75, 150, Inf), 
+                                 labels = c("<35bp", "35-75bp", "75-150bp", ">150bp"))) %>%
+    group_by(binned_distance) %>%
+    summarize(median_contrib = median(contrib_yap1_atcd_motif, na.rm = TRUE))
+  
+  # Find the median contribution for the >150bp group
+  baseline_median <- binned_data %>% 
+    filter(binned_distance == ">150bp") %>% 
+    pull(median_contrib)
+  
+  # Calculate the log ratio relative to the baseline
+  binned_data <- binned_data %>%
+    mutate(log_ratio = log2(median_contrib / baseline_median))
+  
+  
+  # # Plot the data
+  # ggplot(binned_data, aes(x = binned_distance, y = log_ratio, fill = log_ratio)) +
+  #   geom_bar(stat = "identity", color = "black", width = 0.6) +
+  #   scale_fill_gradient2(low = "white", mid = "blue", high = "red", 
+  #                        midpoint = 0, limits = c(min(binned_data$log_ratio), max(binned_data$log_ratio))) +
+  #   labs(title = "Log Ratio of Median YAP1 Contribution at TFAP2C Motif by Binned Distance",
+  #        x = "Binned Distance",
+  #        y = "Log Ratio of Median Contribution") +
+  #   theme_minimal()
+  
+  
+  # Create the plot
+  ggplot(binned_data, aes(x = binned_distance, y = log_ratio, fill = log_ratio)) +
+    geom_bar(stat = "identity", color = "black", width = 0.6) +
+    scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+                         midpoint = 0, limits = c(0, 1.1),  # Adjust limits to match your data range
+                         breaks = seq(0, 1.5, by = 0.25))+  # Adjust breaks for the color legend
+    theme_minimal() +
+    labs(title = "Log Ratio of Median YAP1 Contribution at TFAP2C Motif by Binned Distance", 
+         x = "Binned Distance (bp)", 
+         y = "Log Ratio of median Yap1 contribution", 
+         fill = "Log ratio") +
+    theme(legend.position = "top",
+          legend.title = element_text(size = 10, face = "bold"),
+          legend.text = element_text(size = 9),
+          axis.title.x = element_text(size = 10, face = "bold"),
+          axis.title.y = element_text(size = 10, face = "bold"),
+          axis.text.x = element_text(size = 9),
+          axis.text.y = element_text(size = 9)) +
+    scale_y_continuous(breaks = seq(0, 1.5, by = 0.25), limits = c(0, 1.5))
+  
+```
+
+
+# DESeq on rin3 enhancer with WT and CRISPR mut
+```{r,eval=FALSE}
+motifs.gr <- read_bed("bpnet/analysis/bed/curated_motif_regoion_tsc_model_motifs_fold5_0based_noerv_nopromoter.bed")
+
+rin3only_tead4.list<-list(
+  rin3mut_tead4_rep1 = list(
+    pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_1_normalized_positive.bw",
+    neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_1_normalized_negative.bw"),
+  rin3mut_tead4_rep2 = list(
+    pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_2_normalized_positive.bw",
+    neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_2_normalized_negative.bw"),
+  wt_tead4_rep1 = list(
+    pos = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_4_normalized_positive.bw",
+    neg = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_4_normalized_negative.bw"),
+  wt_tead4_rep2 = list(
+    pos = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_5_normalized_positive.bw",
+    neg = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_5_normalized_negative.bw"))
+
+wt_td_peaks.gr <- read_narrowpeaks('../publication/data_preparation/crispr/peaks/mm10/nexus/combined/mtsc_tead4_nexus_combined_peaks.narrowPeak') %>% keepStandardChromosomes(., pruning.mode = "coarse")
+rin3_td_peaks.gr <- read_narrowpeaks('../publication/data_preparation/crispr/peaks/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_tead4_nexus_combined_peaks.narrowPeak')%>% keepStandardChromosomes(., pruning.mode = "coarse")
+
+# find overlaps
+peaks_common_rin3.gr <- findOverlapPairs(rin3_td_peaks.gr, wt_td_peaks.gr, ignore.strand=T)
+
+# rin3 overlap with motifs
+peaks_sel <- peaks_common_rin3.gr@second
+  
+  ov <- findOverlaps(peaks_sel, motifs.gr, ignore.strand=T)                                                                         
+  motif_peak_ov.gr <- motifs.gr[ov@to]
+  motif_peak_ov.gr <- unique(motif_peak_ov.gr)
+  gr_control <- GRanges(seqnames = c("chr17","chr12","chr15","chr9","chr7","chr1","chr2","chr19","chr10"), strand = c("+","+","+","+","+","+","+","+","+"),
+                        ranges = IRanges(start = c(6827588,102261800,102016018,102726228,65430364,33980924,172759732,55713879,17579465), end=c(6828029,102262303,102016539,102726721,65430848,33981418,172760998,55714382,17579914)))
+  test <- findOverlaps(motif_peak_ov.gr, gr_control, ignore.strand=T)
+  motif_peak_ov.gr[test@from]
+  control_region_motifs <- motif_peak_ov.gr[test@from]
+  gr_rin3 <- GRanges(seqnames = c("chr12"), strand = c("+"),
+                     ranges = IRanges(start = c(102261800), end=c(102262303)))
+test <- findOverlaps(motif_peak_ov.gr, gr_rin3, ignore.strand=T)
+  rin3_motif <- motif_peak_ov.gr[test@from]
+  motif_peak_ov.gr$motif_id <- 1:length(motif_peak_ov.gr)
+  motif_peak_ov.df <- as.data.frame(motif_peak_ov.gr)
+  motif_peak_ov.df$is_red_dot <- motif_peak_ov.df$name %in% rin3_motif$name
+  motif_peak_ov.df$is_green_dot <- motif_peak_ov.df$name %in% control_region_motifs$name
+  motif_peak_ov.gr <- makeGRangesFromDataFrame(motif_peak_ov.df, keep.extra.columns = T, starts.in.df.are.0based = F)
+
+  counts.df<-mclapply(rin3only_tead4.list, function(x){
+    nexus_regionSums(resize(motif_peak_ov.gr,1000,"center"), x)
+  }, mc.cores = 8) %>% as.data.frame()
+colnames(counts.df)<-names(rin3only_tead4.list)
+
+  peak_condition.df<-data.frame(condition = c(rep('mut', 2), rep('wt', 2)))
+peak_condition.df$condition<- factor(peak_condition.df$condition, levels = c( "mut","wt"))
+rownames(peak_condition.df)<-names(rin3only_tead4.list)
+
+library(DESeq2)
+counts.df <- round(counts.df)
+
+dds <- DESeqDataSetFromMatrix(countData = counts.df,
+                              colData = peak_condition.df,
+                              design = ~ condition)
+model <- DESeq(dds)
+res <- results(model)
+  res_df <- as.data.frame(res[, c("log2FoldChange", "pvalue", "padj")])
+  motif_peak_ov.df[motif_peak_ov.df$is_red_dot == TRUE, ]
+  filtered_res <- res_df[c(27130,27131,27132,27133) , ]
+  filtered_res
+  #0.03921115
+  
+  z <- motif_peak_ov.df[motif_peak_ov.df$is_green_dot == TRUE, ]
+  
+  x <- rownames(z)
+  xx <- as.numeric(x)
+  res_df[xx , ]
+
+```
+## best fit line
+
+```{r,eval=FALSE}
+rin3only_crispr_chip_set_rpm.bw.list<-list(
+    rin3mut_polii_c = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_polii_nexus_combined_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_polii_nexus_combined_normalized_negative.bw"), 
+    rin3mut_h3k27ac_c = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_seq_combined_rpkm_normalized.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_seq_combined_rpkm_normalized.bw"),
+    rin3mut_tead4_c = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_tead4_nexus_combined_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_tead4_nexus_combined_normalized_negative.bw"),
+    wt_polii_c = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/nexus/combined/mtsc_polii_nexus_combined_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10/nexus/combined/mtsc_polii_nexus_combined_normalized_negative.bw"),
+    wt_h3k27ac_c = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_seq_combined_ratio_rpkm.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_seq_combined_ratio_rpkm.bw"),
+    wt_tead4_c = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/nexus/combined/mtsc_tead4_nexus_combined_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10/nexus/combined/mtsc_tead4_nexus_combined_normalized_negative.bw"),
+    rin3mut_polii_rep1 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_1_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_1_normalized_negative.bw"), 
+    rin3mut_h3k27ac_rep1 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_1_rpkm_normalized.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_1_rpkm_normalized.bw"),
+    rin3mut_tead4_rep1 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_1_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_1_normalized_negative.bw"),
+    wt_polii_rep1 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_5_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_5_normalized_negative.bw"),
+    wt_h3k27ac_rep1 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_4_rpkm_normalized.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_4_rpkm_normalized.bw"),
+    wt_tead4_rep1 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_4_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_4_normalized_negative.bw"),
+    rin3mut_polii_rep2 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_2_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_2_normalized_negative.bw"), 
+    rin3mut_h3k27ac_rep2 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_2_rpkm_normalized.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_2_rpkm_normalized.bw"),
+    rin3mut_tead4_rep2 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_2_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_2_normalized_negative.bw"),
+    wt_polii_rep2 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_6_normalized_positive.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_6_normalized_negative.bw"),
+    wt_h3k27ac_rep2 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_5_rpkm_normalized.bw",
+        neg = "../publication/data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_5_rpkm_normalized.bw"),
+    wt_tead4_rep2 = list(
+        pos = "../publication/data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_5_normalized_positive.bw",
+        neg = "../publication/ata_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_5_normalized_negative.bw"))
+
+motif_peak_ov.gr$signal_wt <- nexus_regionSums(resize(motif_peak_ov.gr, 1000,"center"), rin3only_crispr_chip_set_rpm.bw.list$wt_tead4_c)
+motif_peak_ov.gr$signal_mut <- nexus_regionSums(resize(motif_peak_ov.gr, 1000,"center"), rin3only_crispr_chip_set_rpm.bw.list$rin3mut_tead4_c)
+
+motif_peak_ov.df <- as.data.frame(motif_peak_ov.gr)
+library(ggpubr)
+
+r <- motif_peak_ov.df %>%
+  ggplot(aes(x = log2(signal_wt), y = log2(signal_mut))) +
+  ggrastr::geom_point_rast(alpha = 0.3, color = "grey") +
+  
+  # Correcting the filter application
+  ggrastr::geom_point_rast(
+    data = dplyr::filter(motif_peak_ov.df, name %in% control_region_motifs$name),
+    aes(x = log2(signal_wt), y = log2(signal_mut)),
+    color = '#038948', size = 1.5
+  ) +
+  
+  ggrastr::geom_point_rast(
+    data = dplyr::filter(motif_peak_ov.df, name %in% rin3_motif$name),
+    aes(x = log2(signal_wt), y = log2(signal_mut)),
+    color = 'red', size = 1.5
+  ) +
+  
+  geom_smooth(method = "lm", se = FALSE, color = "black",linetype = "dashed")+
+  xlab("log2(WT)") +
+  ylab("log2(Rin3 CRISPR)") +
+  ggtitle("Tead4 ChIP-nexus") +
+  
+  # Ensure stat_cor applies correctly
+  stat_cor(data = motif_peak_ov.df, aes(x = log2(signal_wt), y = log2(signal_mut)), method = "pearson") +
+  
+  theme_classic()
+
+
+m_theme = theme(
+  axis.title.x = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.title.y = element_text(size = 16),
+  axis.text.y = element_text(size = 14))
+rx <- r + m_theme
+
+ggsave("figures/final/tead4_rin3_correlation_wtmut_bestfit.pdf",rx,height= 6, width=4)
+
+```
+
+# deseq for polii and best fit line
+
+```{r,eval=FALSE}
+
+#polii
+
+rin3only_polii.bw.list<-list(
+  rin3mut_polii_rep1 = list(
+    pos = "../publication/data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_1_normalized_positive.bw",
+    neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_1_normalized_negative.bw"), 
+  rin3mut_polii_rep2 = list(
+    pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_2_normalized_positive.bw",
+    neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_2_normalized_negative.bw"), 
+  wt_polii_rep1 = list(
+    pos = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_5_normalized_positive.bw",
+    neg = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_5_normalized_negative.bw"),
+  wt_polii_rep2 = list(
+    pos = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_6_normalized_positive.bw",
+    neg = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_6_normalized_negative.bw"))
+
+
+
+wt_polii_peaks.gr <- read_narrowpeaks('../../data_preparation/crispr/peaks/mm10/nexus/combined/mtsc_polii_nexus_combined_peaks.narrowPeak') %>% keepStandardChromosomes(., pruning.mode = "coarse")
+rin3_polii_peaks.gr <- read_narrowpeaks('../../data_preparation/crispr/peaks/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_polii_nexus_combined_peaks.narrowPeak')%>% keepStandardChromosomes(., pruning.mode = "coarse")
+
+peaks_common_rin3.gr <- findOverlapPairs(rin3_polii_peaks.gr, wt_polii_peaks.gr, ignore.strand=T)
+
+peaks_sel <- peaks_common_rin3.gr@second
+
+ov <- findOverlaps(peaks_sel, motifs.gr, ignore.strand=T)                                                                         
+motif_peak_ov.gr <- motifs.gr[ov@to]
+motif_peak_ov.gr <- unique(motif_peak_ov.gr)
+
+gr_control <- GRanges(seqnames = c("chr17","chr12","chr15","chr9","chr7","chr1","chr2","chr19","chr10"), strand = c("+","+","+","+","+","+","+","+","+"),
+                      ranges = IRanges(start = c(6827588,102261800,102016018,102726228,65430364,33980924,172759732,55713879,17579465), end=c(6828029,102262303,102016539,102726721,65430848,33981418,172760998,55714382,17579914)))
+test <- findOverlaps(motif_peak_ov.gr, gr_control, ignore.strand=T)
+motif_peak_ov.gr[test@from]
+control_region_motifs <- motif_peak_ov.gr[test@from]
+gr_rin3 <- GRanges(seqnames = c("chr12"), strand = c("+"),
+                   ranges = IRanges(start = c(102261800), end=c(102262303)))
+test <- findOverlaps(motif_peak_ov.gr, gr_rin3, ignore.strand=T)
+rin3_motif <- motif_peak_ov.gr[test@from]
+motif_peak_ov.gr$motif_id <- 1:length(motif_peak_ov.gr)
+motif_peak_ov.df <- as.data.frame(motif_peak_ov.gr)
+motif_peak_ov.df$is_red_dot <- motif_peak_ov.df$name %in% rin3_motif$name
+motif_peak_ov.df$is_green_dot <- motif_peak_ov.df$name %in% control_region_motifs$name
+motif_peak_ov.gr <- makeGRangesFromDataFrame(motif_peak_ov.df, keep.extra.columns = T, starts.in.df.are.0based = F)
+
+counts.df<-mclapply(rin3only_polii.bw.list, function(x){
+  nexus_regionSums(resize(motif_peak_ov.gr,1000,"center"), x)
+}, mc.cores = 8) %>% as.data.frame()
+colnames(counts.df)<-names(rin3only_polii.bw.list)
+
+peak_condition.df<-data.frame(condition = c(rep('mut', 2), rep('wt', 2)))
+peak_condition.df$condition<- factor(peak_condition.df$condition, levels = c( "mut","wt"))
+rownames(peak_condition.df)<-names(rin3only_polii.bw.list)
+
+
+counts.df <- round(counts.df)
+
+dds <- DESeqDataSetFromMatrix(countData = counts.df,
+                              colData = peak_condition.df,
+                              design = ~ condition)
+model <- DESeq(dds)
+res <- results(model)
+res_df <- as.data.frame(res[, c("log2FoldChange", "pvalue", "padj")])
+motif_peak_ov.df[motif_peak_ov.df$is_red_dot == TRUE, ]
+filtered_res <- res_df[c(9191,9192,9193,9194) , ]
+filtered_res
+z <- motif_peak_ov.df[motif_peak_ov.df$is_green_dot == TRUE, ]
+
+x <- rownames(z)
+xx <- as.numeric(x)
+res_df[xx , ]
+
+
+motif_peak_ov.gr$signal_wt <- nexus_regionSums(resize(motif_peak_ov.gr, 1000,"center"), rin3only_crispr_chip_set_rpm.bw.list$wt_polii_c)
+motif_peak_ov.gr$signal_mut <- nexus_regionSums(resize(motif_peak_ov.gr, 1000,"center"), rin3only_crispr_chip_set_rpm.bw.list$rin3mut_polii_c)
+
+motif_peak_ov.df <- as.data.frame(motif_peak_ov.gr)
+library(ggpubr)
+
+r <- motif_peak_ov.df %>%
+  ggplot(aes(x = log2(signal_wt), y = log2(signal_mut))) +
+  ggrastr::geom_point_rast(alpha = 0.3, color = "grey") +
+  
+  # Correcting the filter application
+  ggrastr::geom_point_rast(
+    data = dplyr::filter(motif_peak_ov.df, name %in% control_region_motifs$name),
+    aes(x = log2(signal_wt), y = log2(signal_mut)),
+    color = '#038948', size = 1.5
+  ) +
+  
+  ggrastr::geom_point_rast(
+    data = dplyr::filter(motif_peak_ov.df, name %in% rin3_motif$name),
+    aes(x = log2(signal_wt), y = log2(signal_mut)),
+    color = 'red', size = 1.5
+  ) +
+  
+  geom_smooth(method = "lm", se = FALSE, color = "black",linetype = "dashed")+
+  xlab("log2(WT)") +
+  ylab("log2(Rin3 CRISPR)") +
+  ggtitle("PolII ChIP-nexus") +
+  
+  # Ensure stat_cor applies correctly
+  stat_cor(data = motif_peak_ov.df, aes(x = log2(signal_wt), y = log2(signal_mut)), method = "pearson") +
+  
+  theme_classic()
+
+
+m_theme = theme(
+  axis.title.x = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.title.y = element_text(size = 16),
+  axis.text.y = element_text(size = 14))
+rx <- r + m_theme
+ggsave("rebuttal/figures/final/polii_rin3_correlation_wtmut_bestfit.pdf",rx,height= 6, width=4)
+
+ggplot(filtered_res, aes(x = baseMean, y = log2FoldChange)) +
+    geom_point() +
+    labs(title = "Differential Expression Analysis",
+         x = "Base Mean",
+         y = "Log2 Fold Change",
+         caption = "Note: Displayed p-values are raw and not adjusted for multiple comparisons.") +
+    theme_classic()
+
+---
+  #MA plot
+  
+# Generate the MA plot
+plotMA(res, ylim=c(-9, 9), main="MA Plot with Annotated Regions")
+
+# Extract the log2FoldChange and mean values for the regions of interest
+selected_points <- filtered_res
+selected_means <- res$baseMean[c(9191, 9192, 9193, 9194)]
+
+# Add larger and differently colored points for the regions of interest
+points(selected_means, selected_points$log2FoldChange, col="red", pch=19, cex=0.5)
+
+# Annotate each point with a label, positioned slightly away from the points
+text(selected_means, selected_points$log2FoldChange, labels=paste("Region", c(9191, 9192, 9193, 9194)), 
+     pos=4, offset=0.7, cex=0.2, col="red", font=2)
+  
+----  
+## best fit
+motif_peak_ov.gr$signal_wt <- nexus_regionSums(resize(motif_peak_ov.gr, 1000,"center"), rin3only_crispr_chip_set_rpm.bw.list$wt_polii_c)
+motif_peak_ov.gr$signal_mut <- nexus_regionSums(resize(motif_peak_ov.gr, 1000,"center"), rin3only_crispr_chip_set_rpm.bw.list$rin3mut_polii_c)
+
+motif_peak_ov.df <- as.data.frame(motif_peak_ov.gr)
+library(ggpubr)
+
+r <- motif_peak_ov.df %>%
+  ggplot(aes(x = log2(signal_wt), y = log2(signal_mut))) +
+  ggrastr::geom_point_rast(alpha = 0.3, color = "grey") +
+  
+  # Correcting the filter application
+  ggrastr::geom_point_rast(
+    data = dplyr::filter(motif_peak_ov.df, name %in% control_region_motifs$name),
+    aes(x = log2(signal_wt), y = log2(signal_mut)),
+    color = '#038948', size = 1.5
+  ) +
+  
+  ggrastr::geom_point_rast(
+    data = dplyr::filter(motif_peak_ov.df, name %in% rin3_motif$name),
+    aes(x = log2(signal_wt), y = log2(signal_mut)),
+    color = 'red', size = 1.5
+  ) +
+  
+  geom_smooth(method = "lm", se = FALSE, color = "black",linetype = "dashed")+
+  xlab("log2(WT)") +
+  ylab("log2(Rin3 CRISPR)") +
+  ggtitle("PolII ChIP-nexus") +
+  
+  # Ensure stat_cor applies correctly
+  stat_cor(data = motif_peak_ov.df, aes(x = log2(signal_wt), y = log2(signal_mut)), method = "pearson") +
+  
+  theme_classic()
+
+
+m_theme = theme(
+  axis.title.x = element_text(size = 16),
+  axis.text.x = element_text(size = 14),
+  axis.title.y = element_text(size = 16),
+  axis.text.y = element_text(size = 14))
+rx <- r + m_theme
+ggsave("rebuttal/figures/final/polii_rin3_correlation_wtmut_bestfit.pdf",rx,height= 6, width=4)
+
+```
+
+#h3k27ac
+```{r,eval=FALSE}
+
+h3k27ac
+
+rin3only_h3k27ac.bw.list<-list(
+  rin3mut_h3k27ac_rep1 = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_1_rpkm_normalized.bw",    
+  rin3mut_h3k27ac_rep2= "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_2_rpkm_normalized.bw",
+  wt_h3k27ac_rep1 =  "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_4_rpkm_normalized.bw",
+  wt_h3k27ac_rep2 ="../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_5_rpkm_normalized.bw")
+
+
+wt_h3k_peaks.gr <- read_narrowpeaks('../../data_preparation/crispr/peaks/mm10/seq/combined/mtsc_h3k27ac_seq_combined_peaks.narrowPeak') %>% keepStandardChromosomes(., pruning.mode = "coarse")
+rin3_h3k_peaks.gr <- read_narrowpeaks('../../data_preparation/crispr/peaks/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_seq_combined_peaks.narrowPeak')%>% keepStandardChromosomes(., pruning.mode = "coarse")
+peaks_common_rin3.gr <- findOverlapPairs(rin3_h3k_peaks.gr, wt_h3k_peaks.gr, ignore.strand=T)
+
+peaks_sel <- peaks_common_rin3.gr@second
+
+ov <- findOverlaps(peaks_sel, motifs.gr, ignore.strand=T)                                                                         
+motif_peak_ov.gr <- motifs.gr[ov@to]
+motif_peak_ov.gr <- unique(motif_peak_ov.gr)
+
+gr_control <- GRanges(seqnames = c("chr17","chr12","chr15","chr9","chr7","chr1","chr2","chr19","chr10"), strand = c("+","+","+","+","+","+","+","+","+"),
+                      ranges = IRanges(start = c(6827588,102261800,102016018,102726228,65430364,33980924,172759732,55713879,17579465), end=c(6828029,102262303,102016539,102726721,65430848,33981418,172760998,55714382,17579914)))
+test <- findOverlaps(motif_peak_ov.gr, gr_control, ignore.strand=T)
+motif_peak_ov.gr[test@from]
+control_region_motifs <- motif_peak_ov.gr[test@from]
+gr_rin3 <- GRanges(seqnames = c("chr12"), strand = c("+"),
+                   ranges = IRanges(start = c(102261800), end=c(102262303)))
+test <- findOverlaps(motif_peak_ov.gr, gr_rin3, ignore.strand=T)
+rin3_motif <- motif_peak_ov.gr[test@from]
+motif_peak_ov.gr$motif_id <- 1:length(motif_peak_ov.gr)
+motif_peak_ov.df <- as.data.frame(motif_peak_ov.gr)
+motif_peak_ov.df$is_red_dot <- motif_peak_ov.df$name %in% rin3_motif$name
+motif_peak_ov.df$is_green_dot <- motif_peak_ov.df$name %in% control_region_motifs$name
+motif_peak_ov.gr <- makeGRangesFromDataFrame(motif_peak_ov.df, keep.extra.columns = T, starts.in.df.are.0based = F)
+
+
+counts.df<-mclapply(rin3only_h3k27ac.bw.list, function(x){
+  regionSums(resize(motif_peak_ov.gr,1000,"center"), x)
+}, mc.cores = 8) %>% as.data.frame()
+colnames(counts.df)<-names(rin3only_h3k27ac.bw.list)
+
+peak_condition.df<-data.frame(condition = c(rep('mut', 2), rep('wt', 2)))
+peak_condition.df$condition<- factor(peak_condition.df$condition, levels = c( "mut","wt"))
+rownames(peak_condition.df)<-names(rin3only_h3k27ac.bw.list)
+
+counts.df <- round(counts.df)
+
+dds <- DESeqDataSetFromMatrix(countData = counts.df,
+                              colData = peak_condition.df,
+                              design = ~ condition)
+model <- DESeq(dds)
+res <- results(model)
+res_df <- as.data.frame(res[, c("log2FoldChange", "pvalue", "padj")])
+motif_peak_ov.df[motif_peak_ov.df$is_red_dot == TRUE, ]
+filtered_res <- res_df[c(27130,27131,27132,27133) , ]
+
+filtered_res
+
+
+#with log2 transformed
+
+rin3_h3k27ac_crispr_chip_set_rpm.bw.list<-list(
+  rin3mut_h3k27ac_rep1 = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_1_seq_log2_normalized.bw",
+  rin3mut_h3k27ac_rep2 ="../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_2_seq_log2_normalized.bw", 
+  wt_h3k27ac_rep1 = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_4_seq_log2_normalized.bw",
+  wt_h3k27ac_rep2 = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_5_seq_log2_normalized.bw")
+
+
+
+peak_condition.df<-data.frame(condition = c(rep('mut', 2), rep('wt', 2)))
+peak_condition.df$condition<- factor(peak_condition.df$condition, levels = c( "mut","wt"))
+rownames(peak_condition.df)<-names(rin3_h3k27ac_crispr_chip_set_rpm.bw.list)
+
+counts.df<-mclapply(rin3_h3k27ac_crispr_chip_set_rpm.bw.list, function(x){
+  regionSums(resize(motif_peak_ov.gr,1000,"center"), x)
+}, mc.cores = 8) %>% as.data.frame()
+colnames(counts.df)<-names(rin3_h3k27ac_crispr_chip_set_rpm.bw.list)
+
+
+counts.df <- round(counts.df)
+counts.df[counts.df < 0] <- 0
+
+dds <- DESeqDataSetFromMatrix(countData = counts.df,
+                              colData = peak_condition.df,
+                              design = ~ condition)
+model <- DESeq(dds)
+res <- results(model)
+res_df <- as.data.frame(res[, c("log2FoldChange", "pvalue", "padj")])
+motif_peak_ov.df[motif_peak_ov.df$is_red_dot == TRUE, ]
+
+filtered_res <- res_df[c(16115,16116,16117,16118) , ]
+filtered_res
+
+z <- motif_peak_ov.df[motif_peak_ov.df$is_green_dot == TRUE, ]
+
+x <- rownames(z)
+xx <- as.numeric(x)
+res_df[xx , ]
+
+
+#bestfit
+rin3_h3k27ac_combined.bw.list<-list(
+    rin3mut_h3k27ac_c = "data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_seq_combined_rpkm_normalized.bw",
+    wt_h3k27ac_c = "data_preparation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_seq_combined_rpkm_normalized.bw")
+motif_peak_ov.gr$signal_wt <- regionSums(resize(motif_peak_ov.gr, 1000,"center"), rin3_h3k27ac_combined.bw.list$wt_h3k27ac_c)
+motif_peak_ov.gr$signal_mut <- regionSums(resize(motif_peak_ov.gr, 1000,"center"), rin3_h3k27ac_combined.bw.list$rin3mut_h3k27ac_c)
+
+
+motif_peak_ov.df <- as.data.frame(motif_peak_ov.gr)
+library(ggpubr)
+
+r <- motif_peak_ov.df %>%
+    ggplot(aes(x = log2(signal_wt), y = log2(signal_mut))) +
+    ggrastr::geom_point_rast(alpha = 0.3, color = "grey") +
+    
+    # Correcting the filter application
+    ggrastr::geom_point_rast(
+        data = dplyr::filter(motif_peak_ov.df, name %in% control_region_motifs$name),
+        aes(x = log2(signal_wt), y = log2(signal_mut)),
+        color = '#038948', size = 1.5
+    ) +
+    
+    ggrastr::geom_point_rast(
+        data = dplyr::filter(motif_peak_ov.df, name %in% rin3_motif$name),
+        aes(x = log2(signal_wt), y = log2(signal_mut)),
+        color = 'red', size = 1.5
+    ) +
+    
+    geom_smooth(method = "lm", se = FALSE, color = "black",linetype = "dashed")+
+    xlab("log2(WT)") +
+    ylab("log2(Rin3 CRISPR)") +
+    ggtitle("H3K27ac ChIP-seq") +
+    
+    # Ensure stat_cor applies correctly
+    stat_cor(data = motif_peak_ov.df, aes(x = log2(signal_wt), y = log2(signal_mut)), method = "pearson") +
+    
+    theme_classic()
+
+
+m_theme = theme(
+    axis.title.x = element_text(size = 16),
+    axis.text.x = element_text(size = 14),
+    axis.title.y = element_text(size = 16),
+    axis.text.y = element_text(size = 14))
+rx <- r + m_theme
+ggsave("rebuttal/figures/final/h3k27ac_rin3_correlation_wtmut_bestfit.pdf",rx,height= 6, width=4)
+
+```
+
+
+# Ratio of TSC/ESC
+```{r,eval=FALSE}
+
+#ratio tead4 in tsc/esc
+
+tead4_tsc.gr <- readr::read_tsv("/n/projects/kd2200/publication/bpnet/cwm_task_regions/tead4/motif-instances-task-regions.tsv.gz")  %>% makeGRangesFromDataFrame(seqnames.field = "example_chrom",start.field = "pattern_start_abs", end.field = "pattern_end_abs",starts.in.df.are.0based = F, keep.extra.columns = T)
+
+tead4_esc.gr <- readr::read_tsv("/n/projects/kd2200/publication/bpnet/bpnet_single_tead4_esc/tead4_esc/modisco/profile/dataspec.yaml_default_fold_2/tead4_esc/motif-instances-task-regions.tsv.gz")  %>% makeGRangesFromDataFrame(seqnames.field = "example_chrom",start.field = "pattern_start_abs", end.field = "pattern_end_abs",starts.in.df.are.0based = F, keep.extra.columns = T)
+
+tead4_tsc_m0_p0.gr <- subset(tead4_tsc.gr, pattern_short=="m0_p0")
+tead4_esc_m0_p0.gr <- subset(tead4_esc.gr, pattern_short=="m0_p0")
+tead4_esc_m0_p0.gr$name <- "Tead_single"
+tead4_tsc_m0_p0.gr$name <- "Tead_single"
+
+
+tead4_tsc_m0_p1.gr <- subset(tead4_tsc.gr, pattern_short=="m0_p1")
+tead4_esc_m0_p1.gr <- subset(tead4_esc.gr, pattern_short=="m0_p1")
+tead4_esc_m0_p1.gr$name <- "Tead_double"
+tead4_tsc_m0_p1.gr$name <- "Tead_double"
+
+erv <- rm[grep("ERV", rm$repeat_class)]
+
+tead4_esc_m0_p0.gr <-  tead4_esc_m0_p0.gr[which(!overlapsAny(tead4_esc_m0_p0.gr, erv, ignore.strand=T, minoverlap = 5))]
+
+tead4_tsc_m0_p0.gr <-  tead4_tsc_m0_p0.gr[which(!overlapsAny(tead4_tsc_m0_p0.gr, erv, ignore.strand=T, minoverlap = 5))]
+
+tead4_esc_m0_p1.gr <-  tead4_esc_m0_p1.gr[which(!overlapsAny(tead4_esc_m0_p1.gr, erv, ignore.strand=T, minoverlap = 5))]
+
+tead4_tsc_m0_p1.gr <-  tead4_tsc_m0_p1.gr[which(!overlapsAny(tead4_tsc_m0_p1.gr, erv, ignore.strand=T, minoverlap = 5))]
+
+tses_tead4_merge_m0_p0 <- c(tead4_tsc_m0_p0.gr ,tead4_esc_m0_p0.gr)
+tses_tead4_merge_m0_p1 <- c(tead4_tsc_m0_p1.gr ,tead4_esc_m0_p1.gr)
+
+
+tses_tead4_merge_m0_p0$single_tsc <- nexus_regionSums(resize(tses_tead4_merge_m0_p0,101,"center"), bw.files$tead4_ts)
+
+tses_tead4_merge_m0_p0$single_esc <- nexus_regionSums(resize(tses_tead4_merge_m0_p0,101,"center"), bw.files$tead4_es)
+
+tses_tead4_merge_m0_p1$double_tsc <- nexus_regionSums(resize(tses_tead4_merge_m0_p1,101,"center"), bw.files$tead4_ts)
+
+tses_tead4_merge_m0_p1$double_esc <- nexus_regionSums(resize(tses_tead4_merge_m0_p1,101,"center"), bw.files$tead4_es)
+
+
+tses_tead4_merge_m0_p0$ratio <- tses_tead4_merge_m0_p0$single_tsc/tses_tead4_merge_m0_p0$single_esc
+tses_tead4_merge_m0_p1$ratio <- tses_tead4_merge_m0_p1$double_tsc/tses_tead4_merge_m0_p1$double_esc
+
+
+combine_p01 <- c(tses_tead4_merge_m0_p0,tses_tead4_merge_m0_p1)
+combine_p01.df <- as.data.frame(combine_p01)
+
+
+box_plot <- ggplot(combine_p01.df, aes(x = name, y = log2(ratio), fill = name)) +
+    geom_boxplot(outlier.shape = NA) +
+    labs(title = "Ratio of TEAD4 Binding Signal",
+         x = "Motif",
+         y = "Ratio (TSC/ESC)") +
+    theme_classic() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    scale_fill_manual(values = c("Tead_single" ="#a57fc0" , "Tead_double" = "#5d198e"))
+
+stat_test <-combine_p01.df %>%
+    wilcox.test(log2(ratio) ~ name, data = .)
+
+# Add statistical annotation to the plot
+box_plot + stat_compare_means(method = "wilcox.test", label = "p.signif", comparisons = list(c("Tead_single","Tead_double")))
+```
+
+# Rin3 distance predictions
+```{r,eval=FALSE}
+## contribution & prediction
+
+
+profile_preds.df <- readr::read_csv('../../rebuttal/can_1_1000bp_new_predict_fold5.csv')
+motifs.df <- readr::read_csv('/n/projects/kd2200/analysis/BPNet/cegkttyz_tsc_bpnet/crispr_strategy/round_1_crispr/can_1_coordinates.csv')
+wt_preds.df <- dplyr::filter(profile_preds.df,region_idx==0)
+mut_preds1.df <- dplyr::filter(profile_preds.df,region_idx==1)
+mut_preds2.df <- dplyr::filter(profile_preds.df,region_idx==2)
+mut_preds3.df <- dplyr::filter(profile_preds.df,region_idx==3)
+mut_preds4.df <- dplyr::filter(profile_preds.df,region_idx==4)
+
+g <- ggplot()
+
+for(row in 1:nrow(motifs.df)){
+    g<-g + annotate("rect", xmin = motifs.df$start[row], xmax = motifs.df$end[row],
+                    ymin = -Inf, ymax = Inf, alpha = .2)
+    g<-g + annotate("text", x = motifs.df$start[row], label = motifs.df$name[row], y = Inf, vjust = 1.5)
+}
+
+g<- g+ geom_area(data = wt_preds.df, mapping = aes(position, prediction, group = strand, fill = task), alpha = .7)+
+    geom_line(data = mut_preds1.df, mapping = aes(position, prediction, group = strand, color = task))+
+    facet_grid(task ~ ., scales = "fixed")+
+    scale_x_continuous(limits = c(350,550),
+                       name = "Position (bp)")+
+    scale_y_continuous(name = "BPNet predictions")+
+    scale_fill_manual(values = c('#6e828e', '#7f778c', '#b47382','#788e6e', '#968b71', '#96718f'), name = "WT")+
+    scale_color_manual(values = c('#314d5e', '#493d5c','#94384d','#3e8f1a', '#a87c14','#8c1f78'), name = "Mut")+
+    theme_classic()+ggtitle("rin3_WT & 40bpmut")
+g
+
+ #ggsave("../../rebuttal/can_rin3_wt_40bpmut_pred.pdf",g,height = 6, width = 10)
+ ggsave("../../rebuttal/can_rin3_wt_60bpmut_pred.pdf",g,height = 6, width = 10)
+ ggsave("../../rebuttal/can_rin3_wt_80bpmut_pred.pdf",g,height = 6, width = 10)
+
+
+
+
+
+#contrib
+profile_contrib.df <- readr::read_csv('../../rebuttal/can_1_1000bp_new_contrib_fold5.csv')
+motifs.df <- readr::read_csv('/n/projects/kd2200/analysis/BPNet/cegkttyz_tsc_bpnet/crispr_strategy/round_1_crispr/can_1_coordinates.csv')
+wt_contrib.df <- dplyr::filter(profile_contrib.df,region_idx==0)
+mut_contrib1.df <- dplyr::filter(profile_contrib.df,region_idx==1)
+mut_contrib2.df <- dplyr::filter(profile_contrib.df,region_idx==2)
+mut_contrib3.df <- dplyr::filter(profile_contrib.df,region_idx==3)
+mut_contrib4.df <- dplyr::filter(profile_contrib.df,region_idx==4)
+
+xlim_genomic<-c(myfloor(motifs.df$start, 50)-50, myceiling(motifs.df$end, 50)+50)
+xlim_window<-xlim_genomic- motifs.df$start
+
+plot_contribution_scores<-function(contrib.df, motifs_across_window.df, xlim, subset_by = "task"){
+    
+    #Format to ggseqlogo
+    mat.list<-lapply(unique(contrib.df[[subset_by]]), function(x){
+        c.df<-contrib.df[contrib.df[[subset_by]]==x,]
+        c.df %>% dplyr::filter(task == x) %>% .[,1:4] %>% t %>% as.matrix
+    })
+    names(mat.list)<-unique(contrib.df$task)
+    
+    #Plot using ggseqlogo
+    g<-ggplot()
+    
+    #Add in motif boxes
+    for(row in 1:nrow(motifs_across_window.df)){
+        g<-g + annotate("rect", xmin = motifs_across_window.df$start[row], xmax = motifs_across_window.df$end[row],
+                        ymin = -Inf, ymax = Inf, alpha = .2)
+        g<-g + annotate("text", x = motifs_across_window.df$start[row], label = motifs_across_window.df$name[row], y = Inf, vjust = 1.5)
+    }
+    
+    g<-g + geom_logo(data = mat.list, method='custom', seq_type='dna') + 
+        scale_x_continuous(limits = c(350,550))+
+        scale_y_continuous(name = 'contribution')+
+        facet_wrap(~seq_group, ncol=1, scales='fixed')+
+        theme_classic()+ggtitle("can_rin3")+
+        theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+    return(g)
+    
+}
+
+q <- plot_contribution_scores(contrib.df = wt_contrib.df  %>% dplyr::filter(region_idx==0), 
+                              motifs_across_window.df = motifs.df)
+
+ggsave("../../rebuttal/can_rin3_wt.pdf",q,height = 6, width = 10)     
+
+w <- plot_contribution_scores(contrib.df = mut_contrib1.df %>% dplyr::filter(region_idx==1), 
+                              motifs_across_window.df = motifs.df)
+
+ggsave("../../rebuttal/can_rin3_40bp.pdf",w,height = 6, width = 10)     
+
+e <- plot_contribution_scores(contrib.df = mut_contrib2.df  %>% dplyr::filter(region_idx==2), 
+                              motifs_across_window.df = motifs.df)
+
+ggsave("../../rebuttal/can_rin3_60bp.pdf",e,height = 6, width = 10)     
+   
+v <- plot_contribution_scores(contrib.df = mut_contrib4.df  %>% dplyr::filter(region_idx==4), 
+                              motifs_across_window.df = motifs.df)
+
+ggsave("../../rebuttal/can_rin3_80bp.pdf",v,height = 12, width = 24)     
+
+
+profile_preds_summary_sub1.df <- dplyr::filter(profile_preds_summary.df, position>=50 & position<=950)
+profile_preds_summary_sub1.df <- dplyr::filter(profile_preds_summary_sub1.df,task=="yap1")
+
+data_summary <- profile_preds_summary_sub1.df %>%
+    group_by(task, region_idx) %>%
+    dplyr::summarise(add= abs(sum(prediction)), .groups = 'drop')
+
+
+# Create the bar plot with facet_wrap
+ggplot(data_summary, aes(x = region_idx, y = add, fill =task)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    labs(title = "sum Value by task",
+         x = "task",
+         y = "sum Value") +
+    theme_minimal()
+
+```
+
+#rin3 enahncer activity markers
+```{r,eval=FALSE}
+##normalized h3k27ac
+rin3_h3k27ac_crispr_chip_set_rpm.bw.list<-list(
+    rin3mut_h3k27ac_c = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_mm10_seq_combined_log2_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_mm10_seq_combined_log2_normalized.bw"),
+    rin3mut_h3k27ac_rep1 = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_1_seq_log2_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_1_seq_log2_normalized.bw"), 
+    rin3mut_h3k27ac_rep2 = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_2_seq_log2_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_2_seq_log2_normalized.bw"), 
+    wt_h3k27ac_c = list(
+        pos = "../../data_preparation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_mm10_seq_combined_log2_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_mm10_seq_combined_log2_normalized.bw"),
+    wt_h3k27ac_rep1 = list(
+        pos = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_4_seq_log2_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_4_seq_log2_normalized.bw"),
+    wt_h3k27ac_rep2 = list(
+        pos ="../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_5_seq_log2_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_5_seq_log2_normalized.bw"))
+
+
+gr_rin3 <- gr[2]
+test <- findOverlaps(gr_rin3, motifs.gr, ignore.strand=TRUE)
+gr_rin3_motif <- motifs.gr[test@to]
+gr_rin3_motif1 <- gr_rin3_motif[4]
+gr_rin3_region <- resize(gr_rin3_motif1, 1000, "center")
+
+#combined reps
+gr_rin3_region$signal_wt_h3 <- regionMeans(gr_rin3_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$wt_h3k27ac_c$pos)
+gr_rin3_region$signal_mut_h3 <- regionMeans(gr_rin3_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_c$pos)
+#rep1
+gr_rin3_region$signal_wt_h3_1 <- regionMeans(gr_rin3_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$wt_h3k27ac_rep1$pos)
+gr_rin3_region$signal_mut_h3_1 <- regionMeans(gr_rin3_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_rep1$pos)
+#rep2
+gr_rin3_region$signal_wt_h3_2 <- regionMeans(gr_rin3_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$wt_h3k27ac_rep2$pos)
+gr_rin3_region$signal_mut_h3_2 <- regionMeans(gr_rin3_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_rep2$pos)
+
+
+# GRanges object with 1 range and 8 metadata columns:
+#       seqnames              ranges strand |         name     score signal_wt_h3 signal_mut_h3 signal_wt_h3_1 signal_mut_h3_1
+#          <Rle>           <IRanges>  <Rle> |  <character> <numeric>    <numeric>     <numeric>      <numeric>       <numeric>
+#   [1]    chr12 102261529-102262528      + | yap1_0_80735         0      3.87346        2.6429         3.7843         2.59816
+#       signal_wt_h3_2 signal_mut_h3_2
+#            <numeric>       <numeric>
+#   [1]        4.03855         2.70232
+#   -------
+#   seqinfo: 21 sequences from an unspecified genome; no seqlengths
+
+
+rin3only_crispr_chip_set_rpm.bw.list<-list(
+    rin3mut_polii_c = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_polii_nexus_combined_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_polii_nexus_combined_normalized_negative.bw"), 
+    rin3mut_h3k27ac_c = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_seq_combined_rpkm_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_seq_combined_rpkm_normalized.bw"),
+    rin3mut_tead4_c = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_tead4_nexus_combined_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/combined/mtsc_rin3mut_tead4_nexus_combined_normalized_negative.bw"),
+    wt_polii_c = list(
+        pos = "../../data_preparation/crispr/bw/mm10/nexus/combined/mtsc_polii_nexus_combined_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/nexus/combined/mtsc_polii_nexus_combined_normalized_negative.bw"),
+    wt_h3k27ac_c = list(
+        pos = "../../data_preparation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_seq_combined_ratio_rpkm.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_seq_combined_ratio_rpkm.bw"),
+    wt_tead4_c = list(
+        pos = "../../data_preparation/crispr/bw/mm10/nexus/combined/mtsc_tead4_nexus_combined_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/nexus/combined/mtsc_tead4_nexus_combined_normalized_negative.bw"),
+    rin3mut_polii_rep1 = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_1_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_1_normalized_negative.bw"), 
+    rin3mut_h3k27ac_rep1 = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_1_rpkm_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_1_rpkm_normalized.bw"),
+    rin3mut_tead4_rep1 = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_1_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_1_normalized_negative.bw"),
+    wt_polii_rep1 = list(
+        pos = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_5_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_5_normalized_negative.bw"),
+    wt_h3k27ac_rep1 = list(
+        pos = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_4_rpkm_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_4_rpkm_normalized.bw"),
+    wt_tead4_rep1 = list(
+        pos = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_4_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_4_normalized_negative.bw"),
+    rin3mut_polii_rep2 = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_2_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_polii_nexus_2_normalized_negative.bw"), 
+    rin3mut_h3k27ac_rep2 = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_2_rpkm_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_seq_2_rpkm_normalized.bw"),
+    rin3mut_tead4_rep2 = list(
+        pos = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_2_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/nexus/individual/mtsc_rin3mut_tead4_nexus_2_normalized_negative.bw"),
+    wt_polii_rep2 = list(
+        pos = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_6_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_polii_nexus_6_normalized_negative.bw"),
+    wt_h3k27ac_rep2 = list(
+        pos = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_5_rpkm_normalized.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_seq_5_rpkm_normalized.bw"),
+    wt_tead4_rep2 = list(
+        pos = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_5_normalized_positive.bw",
+        neg = "../../data_preparation/crispr/bw/mm10/nexus/individual/mtsc_tead4_nexus_5_normalized_negative.bw"))
+
+gr_rin3 <- gr[2]
+test <- findOverlaps(gr_rin3, motifs.gr, ignore.strand=TRUE)
+gr_rin3_motif <- motifs.gr[test@to]
+gr_rin3_motif1 <- gr_rin3_motif[4]
+gr_rin3_region <- resize(gr_rin3_motif1, 1000, "center")
+
+#combined reps
+gr_rin3_region$signal_wt_h3 <- regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_h3k27ac_c$pos)
+gr_rin3_region$signal_mut_h3 <- regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_c$pos)
+gr_rin3_region$signal_wt_polii <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_polii_c)
+gr_rin3_region$signal_mut_polii <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_polii_c)
+gr_rin3_region$signal_wt_tead4 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_tead4_c)
+gr_rin3_region$signal_mut_tead4 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_tead4_c)
+
+#rep1
+gr_rin3_region$signal_wt_h3_1 <- regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_h3k27ac_rep1$pos)
+gr_rin3_region$signal_mut_h3_1 <- regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_rep1$pos)
+gr_rin3_region$signal_wt_polii_1 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_polii_rep1)
+gr_rin3_region$signal_mut_polii_1 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_polii_rep1)
+gr_rin3_region$signal_wt_tead4_1 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_tead4_rep1)
+gr_rin3_region$signal_mut_tead4_1 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_tead4_rep1)
+
+#rep2
+gr_rin3_region$signal_wt_h3_2 <- regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_h3k27ac_rep2$pos)
+gr_rin3_region$signal_mut_h3_2 <- regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_rep2$pos)
+gr_rin3_region$signal_wt_polii_2 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_polii_rep2)
+gr_rin3_region$signal_mut_polii_2 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_polii_rep2)
+gr_rin3_region$signal_wt_tead4_2 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$wt_tead4_rep2)
+gr_rin3_region$signal_mut_tead4_2 <- nexus_regionSums(gr_rin3_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_tead4_rep2)
+gr_rin3_region
+
+# GRanges object with 1 range and 20 metadata columns:
+#       seqnames              ranges strand |         name     score signal_wt_h3 signal_mut_h3 signal_wt_polii signal_mut_polii
+#          <Rle>           <IRanges>  <Rle> |  <character> <numeric>    <numeric>     <numeric>       <numeric>        <numeric>
+#   [1]    chr12 102261529-102262528      + | yap1_0_80735         0      12251.7       5064.53         6.43493         0.758524
+#       signal_wt_tead4 signal_mut_tead4 signal_wt_h3_1 signal_mut_h3_1 signal_wt_polii_1 signal_mut_polii_1 signal_wt_tead4_1
+#             <numeric>        <numeric>      <numeric>       <numeric>         <numeric>          <numeric>         <numeric>
+#   [1]         24.4453          7.49246          12779         4933.39           6.96397           0.964998           20.4438
+#       signal_mut_tead4_1 signal_wt_h3_2 signal_mut_h3_2 signal_wt_polii_2 signal_mut_polii_2 signal_wt_tead4_2 signal_mut_tead4_2
+#                <numeric>      <numeric>       <numeric>         <numeric>          <numeric>         <numeric>          <numeric>
+#   [1]            6.41063        13903.7         5284.43           5.02141           0.467033           38.0956            8.15699
+#   -------
+#   seqinfo: 21 sequences from an unspecified genome; no seqlengths
+
+
+# Data input
+activity <- rep(c("Tead4","H3K27ac","PolII"), each = 2)
+motif_name <- rep(c("a_WT_tead4", "b_WT_h3k27c","c_WT_polii","d_mut_tead4", "e_mut_h3k27c","f_mut_polii"), each = 2)
+average <- c(a=c(24.4453), b=c(3.87346), c=c(6.43493), d=c(7.49246), e=c(2.6429), f=c(0.758524))
+rep <- c(a=c(20.4438, 38.0956), b=c(3.7843, 4.03855), c=c(6.96397, 5.02141), d=c(6.41063 , 8.15699), e=c(2.59816, 2.70232), f=c(0.964998, 0.467033))
+
+df <- data.frame(motif_name, average, rep, activity)
+
+# Calculate SEM for each group
+df_summary <- df %>%
+    group_by(motif_name, activity) %>%
+    summarise(
+        average = mean(rep),
+        SEM = sd(rep) / sqrt(n())
+    )
+
+# Print the summary data frame
+print(df_summary)
+
+
+# Create the bar plot with SEM error bars
+p <- ggplot(data = df_summary, aes(x = motif_name, y = average)) +
+    facet_wrap(~activity, scales = "free", ncol = 3) +
+    geom_bar(stat = "identity", fill = "#1ba14a", width = 0.7) +
+    geom_errorbar(aes(ymin = average - SEM, ymax = average + SEM), width = 0.2) +
+    geom_point(data = df, aes(x = motif_name, y = rep), color = "black") +
+    theme_classic() +
+    ylab("Normalized Reads") +
+    xlab("")
+
+# Display the final plot
+print(p)
+```
+
+#Jensen-shannon distance
+
+```{r,eval=FALSE}
+# Jensen-shannon distance
+# Kudos: https://jamesmccaffrey.wordpress.com/2021/07/13/jensen-shannon-distance-example/
+
+calculate_kl_divergence<-function(p1, p2){
+  #Inputs:
+  #p1: measured counts of coverage, converted to a probability
+  #p2: measured counts of coverage , converted to a probability
+  
+  #Calcule KL divergence
+  p1_n = length(p1)
+  kl_sum = 0
+  kl_div<-lapply(1:p1_n, function(x){
+    p1[x] * log(p1[x] / p2[x])
+  }) %>% unlist() %>% sum(., na.rm = T)
+  return(kl_div)
+}
+
+calculate_jensen_shannon_distance<-function(cov1, cov2){
+  #Inputs:
+  #cov1: measured counts of coverage
+  #cov2: measured counts of coverage 
+  
+  testit::assert(length(cov1)==length(cov2))
+  
+  #Convert coverage to probability distribution
+  prob1<-cov1/sum(cov1)
+  prob2<-cov2/sum(cov2)
+  
+  #Calculate shared distribution average
+  m = (prob1 + prob2)/2
+  left = calculate_kl_divergence(prob1, m)
+  right = calculate_kl_divergence(prob2, m)
+  return(sqrt((left + right) / 2))
+}
+
+regions.gr<-rtracklayer::import('/n/projects/kd2200/publication/bpnet/bed/mtsc_tead4_nexus_idr_peaks.bed')
+obs.list<-exo_metapeak_matrix(GenomicRanges::resize(regions.gr, 1, 'center'), 
+                              sample = list(pos = '/n/projects/kd2200/publication/data_preparation/bw/mm10/nexus/combined/mtsc_tead4_nexus_combined_positive.bw',
+                                            neg = '/n/projects/kd2200/publication/data_preparation/bw/mm10/nexus/combined/mtsc_tead4_nexus_combined_negative.bw'),
+                              upstream = 500, downstream = 500)
+pred.list<-exo_metapeak_matrix(GenomicRanges::resize(regions.gr, 1, 'center'), 
+                              sample = list(pos = '/n/projects/kd2200/publication/bpnet/pred_contrib_bws/tead4.preds.pos.bw',
+                                            neg = '/n/projects/kd2200/publication/bpnet/pred_contrib_bws/tead4.preds.neg.bw'),
+                              upstream = 500, downstream = 500)
+obs.mat<-obs.list$pos + abs(obs.list$neg)
+pred.mat<-pred.list$pos + abs(pred.list$neg)
+
+regions.gr$js_dist<-mclapply(1:dim(obs.mat)[1], function(x){
+  calculate_jensen_shannon_distance(obs.mat[x,], pred.mat[x,])
+}, mc.cores = 8) %>% unlist()
+
+regions.gr %>% plyranges::filter(!is.na(js_dist))
+regions.gr$js_dist %>% summary()
+
+regions.gr$peak_id <- 1:length(regions.gr)
+gr_fgf <- GRanges(seqnames = c("chr8"), strand = c("+"),
+                  ranges = IRanges(start = c(25503600), end=c(25504000)))
+test <- findOverlaps(regions.gr, gr_fgf , ignore.strand=T)
+gr_motif <- regions.gr[test@from]
+regions_resize.df <- as.data.frame(regions.gr)
+regions_resize.df$is_red_dot <- regions_resize.df$peak_id %in% gr_motif$peak_id
+
+regions_resize.df[regions_resize.df$is_red_dot == TRUE, ]
+
+
+#for supl figures
+regions.gr$peak_id <- 1:length(regions.gr)
+gr1 <- GRanges(seqnames = c("chr8","chr9","chr1","chr15"), strand = c("+","+","+","+"),
+                  ranges = IRanges(start = c(25503600,102726500,62398500,102016018), end=c(25504000,102727000,62398900,102016539)))
+test <- findOverlaps(regions.gr, gr1 , ignore.strand=T)
+gr_motif <- regions.gr[test@from]
+regions_resize.df <- as.data.frame(regions.gr)
+regions_resize.df$is_red_dot <- regions_resize.df$peak_id %in% gr_motif$peak_id
+
+regions_resize.df[regions_resize.df$is_red_dot == TRUE, ]
+```
+
+# bar plots of rin3 enhancer activity
+
+```{r,eval=FALSE}
+
+ gr_others <- GRanges(seqnames = c("chr15","chr9","chr7","chr1","chr2","chr19","chr10"), strand = c("+","+","+","+","+","+","+"),
+                       ranges = IRanges(start = c(102016018,102726228,65430364,33980924,172759732,55713879,17579465), end=c(102016539,102726721,65430848,33981418,172760998,55714382,17579914)))
+  motifs.gr <- read_bed("bed/curated_motif_regoion_tsc_model_motifs_fold5_0based_noerv_nopromoter.bed")
+  
+  rin3_h3k27ac_crispr_chip_set_rpm.bw.list<-list(
+    rin3mut_h3k27ac_c = list(
+      pos = "../../data_preperation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_mm10_seq_combined_log2_normalized.bw",
+      neg = "../../data_preperation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/combined/mtsc_rin3mut_h3k27ac_mm10_seq_combined_log2_normalized.bw"),
+    rin3mut_h3k27ac_rep1 = list(
+      pos = "../../data_preperation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_1_seq_log2_normalized.bw",
+      neg = "../../data_preperation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_1_seq_log2_normalized.bw"), 
+    rin3mut_h3k27ac_rep2 = list(
+      pos = "../../data_preperation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_2_seq_log2_normalized.bw",
+      neg = "../../data_preperation/crispr/bw/mm10_mtsc_h32_rin3_ttdis_mut_2bpdel/seq/individual/mtsc_rin3mut_h3k27ac_2_seq_log2_normalized.bw"), 
+    wt_h3k27ac_c = list(
+      pos = "../../data_preperation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_mm10_seq_combined_log2_normalized.bw",
+      neg = "../../data_preperation/crispr/bw/mm10/seq/combined/mtsc_h3k27ac_mm10_seq_combined_log2_normalized.bw"),
+    wt_h3k27ac_rep1 = list(
+      pos = "../../data_preperation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_4_seq_log2_normalized.bw",
+      neg = "../../data_preperation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_4_seq_log2_normalized.bw"),
+    wt_h3k27ac_rep2 = list(
+      pos ="../../data_preperation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_5_seq_log2_normalized.bw",
+      neg = "../../data_preperation/crispr/bw/mm10/seq/individual/mtsc_h3k27ac_5_seq_log2_normalized.bw"))
+  
+
+  gr_others_region <- resize(gr_others, 2000, "center")
+
+  #combined reps
+  gr_others_region$signal_wt_h3 <- regionMeans(gr_others_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$wt_h3k27ac_c$pos)
+  gr_others_region$signal_mut_h3 <- regionMeans(gr_others_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_c$pos)
+  #rep1
+  gr_others_region$signal_wt_h3_1 <- regionMeans(gr_others_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$wt_h3k27ac_rep1$pos)
+  gr_others_region$signal_mut_h3_1 <- regionMeans(gr_others_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_rep1$pos)
+  #rep2
+  gr_others_region$signal_wt_h3_2 <- regionMeans(gr_others_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$wt_h3k27ac_rep2$pos)
+  gr_others_region$signal_mut_h3_2 <- regionMeans(gr_others_region, rin3_h3k27ac_crispr_chip_set_rpm.bw.list$rin3mut_h3k27ac_rep2$pos)
+  
+  gr_others_region
+  
+  
+  gr_others_region$mean_signal_wt_h3 <- mean(gr_others_region$signal_wt_h3)
+  gr_others_region$mean_signal_wt_h3_1 <- mean(gr_others_region$signal_wt_h3_1)
+  gr_others_region$mean_signal_wt_h3_2 <- mean(gr_others_region$signal_wt_h3_2)
+  
+  gr_others_region$mean_signal_mut_h3 <- mean(gr_others_region$signal_mut_h3)
+  gr_others_region$mean_signal_mut_h3_1 <- mean(gr_others_region$signal_mut_h3_1)
+  gr_others_region$mean_signal_mut_h3_2 <- mean(gr_others_region$signal_mut_h3_2)
+
+  
+  gr_others_region$signal_wt_polii <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$wt_polii_c)
+  gr_others_region$signal_mut_polii <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_polii_c)
+  gr_others_region$signal_wt_tead4 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$wt_tead4_c)
+  gr_others_region$signal_mut_tead4 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_tead4_c)
+  
+  #rep1
+  
+  gr_others_region$signal_wt_polii_1 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$wt_polii_rep1)
+  gr_others_region$signal_mut_polii_1 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_polii_rep1)
+  gr_others_region$signal_wt_tead4_1 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$wt_tead4_rep1)
+  gr_others_region$signal_mut_tead4_1 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_tead4_rep1)
+  
+  #rep2
+  gr_others_region$signal_wt_polii_2 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$wt_polii_rep2)
+  gr_others_region$signal_mut_polii_2 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_polii_rep2)
+  gr_others_region$signal_wt_tead4_2 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$wt_tead4_rep2)
+  gr_others_region$signal_mut_tead4_2 <- nexus_regionSums(gr_others_region, rin3only_crispr_chip_set_rpm.bw.list$rin3mut_tead4_rep2)
+  
+  gr_others_region$mean_signal_wt_polii <- mean(gr_others_region$signal_wt_polii)
+  gr_others_region$mean_signal_mut_polii <- mean(gr_others_region$signal_mut_polii)
+  
+  gr_others_region$mean_signal_wt_polii_1 <- mean(gr_others_region$signal_wt_polii_1)
+  gr_others_region$mean_signal_mut_polii_1 <- mean(gr_others_region$signal_mut_polii_1)
+  
+  gr_others_region$mean_signal_wt_polii_2 <- mean(gr_others_region$signal_wt_polii_2)
+  gr_others_region$mean_signal_mut_polii_2 <- mean(gr_others_region$signal_mut_polii_2)
+  
+  #tead4
+  gr_others_region$mean_signal_wt_tead4 <- mean(gr_others_region$signal_wt_tead4)
+  gr_others_region$mean_signal_mut_tead4 <- mean(gr_others_region$signal_mut_tead4)
+  
+  gr_others_region$mean_signal_wt_tead4_1 <- mean(gr_others_region$signal_wt_tead4_1)
+  gr_others_region$mean_signal_mut_tead4_1 <- mean(gr_others_region$signal_mut_tead4_1)
+  
+  gr_others_region$mean_signal_wt_tead4_2 <- mean(gr_others_region$signal_wt_tead4_2)
+  gr_others_region$mean_signal_mut_tead4_2 <- mean(gr_others_region$signal_mut_tead4_2)
+  
+ 
+#tead4
+  
+  # Define the data
+  activity <- rep(c("Tead4"), each = 2)
+  motif_name <- c("a_WT_tead4", "b_mut_tead4", "c_control_WT_tead4","d_control_mut_tead4")
+  average <- c(26.8195, 9.02066,31.3148,41.5193)
+  rep1 <- c(22.5693, 7.62644, 30,40.4296)
+  rep2 <- c(41.3071, 9.87788, 43.783,42.2256)
+  
+  # Create a dataframe
+  df <- data.frame(motif_name, average, rep1, rep2, activity)
+  
+  # Calculate standard deviation for error bars
+  df$error <- apply(df[, c("rep1", "rep2")], 1, sd)
+  
+  # Plot with error bars
+  p <- ggplot(data = df, aes(x = motif_name, y = average)) +
+    facet_wrap(~activity, scales = "free", ncol = 3) +
+    geom_bar(stat = "identity", fill = "#1ba14a", width = 0.7) +
+    geom_point(aes(y = rep1), color = "black") +
+    geom_point(aes(y = rep2), color = "black") +
+    geom_errorbar(aes(ymin = average - error, ymax = average + error), width = 0.1, color="darkgrey") +
+    theme_classic2() +
+    ylab("Normalized Reads") +
+    xlab("")
+  
+  p
+  
+  
+# h3k27ac  
+  # Define the data
+  activity <- rep(c("H3K27ac"), each = 2)
+  motif_name <- c("b_WT_h3k27c", "e_mut_h3k27c","h_control_WT_h3k27ac","k_control_mut_h3k27ac")
+  average <- c(3.5, 2.3,3.06944,3.40109)
+  rep1 <- c(3.6, 2.2,2.87406,3.5134)
+  rep2 <- c(3.3, 2.4,3.13889,3.16553)
+  
+  # Create a dataframe
+  df <- data.frame(motif_name, average, rep1, rep2, activity)
+  
+  # Calculate standard deviation for error bars
+  df$error <- apply(df[, c("rep1", "rep2")], 1, sd)
+  
+  # Plot with error bars
+  p <- ggplot(data = df, aes(x = motif_name, y = average)) +
+    facet_wrap(~activity, scales = "free", ncol = 3) +
+    geom_bar(stat = "identity", fill = "#1ba14a", width = 0.7) +
+    geom_point(aes(y = rep1), color = "black") +
+    geom_point(aes(y = rep2), color = "black") +
+    geom_errorbar(aes(ymin = average - error, ymax = average + error), width = 0.1, color="darkgrey") +
+    theme_classic2() +
+    ylab("Normalized Reads") +
+    xlab("")
+  
+  p
+  
+  
+  
+   
+  ## polii
+  # Define the data
+  activity <- rep(c( "PolII"), each = 2)
+  motif_name <- c("c_WT_polii", "f_mut_polii", "i_control_WT_polii","l_control_mut_polii")
+  average <- c(8.56459, 0.935513,13.8783,12.7468)
+  rep1 <- c(9.7032, 1.18104,13.7939,13.7939)
+  rep2 <- c(5.52636, 0.588868, 11.8382,11.2813)
+  
+  # Create a dataframe
+  df <- data.frame(motif_name, average, rep1, rep2, activity)
+  
+  # Calculate standard deviation for error bars
+  df$error <- apply(df[, c("rep1", "rep2")], 1, sd)
+  
+  # Plot with error bars
+  p <- ggplot(data = df, aes(x = motif_name, y = average)) +
+    facet_wrap(~activity, scales = "free", ncol = 3) +
+    geom_bar(stat = "identity", fill = "#1ba14a", width = 0.7) +
+    geom_point(aes(y = rep1), color = "black") +
+    geom_point(aes(y = rep2), color = "black") +
+    geom_errorbar(aes(ymin = average - error, ymax = average + error), width = 0.1, color="darkgrey") +
+    theme_classic2() +
+    ylab("Normalized Reads") +
+    xlab("")
+  
+  p
+  
+```
+
+```{r, distance heatmap correlation,eval=FALSE}
+all_tf_final_no_promoter.gr<-readr::read_tsv("/n/projects/kd2200/publication/bpnet/analysis/tsv/all_tfregions_with_binding_activity.tsv") %>% makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based =F)
+
+# tead4 at tfap2c (tead4single_tfap2c)
+# binned_distance median_contrib log_ratio     contrib_of  contrib_at  motif-pair
+# <fct>                    <dbl>     <dbl>
+#   1 <35bp                    0.493     1.86     tead4    tfap2c    tead4single_tfap2c
+# 2 35-75bp                  0.313     1.21 
+# 3 75-150bp                 0.210     0.636
+# 4 >150bp                   0.135     0  
+# 
+# 
+# tead4 at cdx2 (tead4_cdx2)
+# binned_distance median_contrib log_ratio.      contrib_of  contrib_at  motif-pair
+# <fct>                    <dbl>     <dbl>
+#   1 <35bp                  0.0640       4.00.  tead4    cdx2    tead4single_cdx2
+# 2 35-75bp                0.0365       3.19
+# 3 75-150bp               0.0159       1.99
+# 4 >150bp                 0.00400      0   
+# 
+# 
+# yap1 at tfap2c (tead4dobule_tfap2c)
+# binned_distance median_contrib log_ratio 
+# <fct>                    <dbl>     <dbl>.     contrib_of  contrib_at  motif-pair
+#   1 <35bp                   0.222      1.32   yap1    tfap2c    tead4double_tfap2c
+# 2 35-75bp                 0.137      0.624.   
+# 3 75-150bp                0.0606    -0.550
+# 4 >150bp                  0.0887     0    
+# 
+# tead4 at tfap2c (tead4dobule_tfap2c)
+# binned_distance median_contrib log_ratio.  contrib_of  contrib_at  motif-pair
+# <fct>                    <dbl>     <dbl>
+#   1 <35bp                    0.575    1.88  tead4    tfap2c    tead4double_tfap2c
+# 2 35-75bp                  0.309    0.983 
+# 3 75-150bp                 0.164    0.0705
+# 4 >150bp                   0.156    0   
+
+# tead4 at gata3 (tead4_gata3)
+# binned_distance median_contrib log_ratio.     contrib_of  contrib_at  motif-pair
+# <fct>                    <dbl>     <dbl>
+#   1 <35bp                  0.0165      0.878.  tead4    gata3    tead4single_gata3
+# 2 35-75bp                0.00503    -0.832
+# 3 75-150bp               0.0224      1.32 
+# 4 >150bp                 0.00895     0  
+# 
+# yap1 at gata3 (tead4_gata3)
+# # A tibble: 4 × 3
+# binned_distance median_contrib log_ratio
+# <fct>                    <dbl>     <dbl>
+#   1 <35bp                  -0.0195    -0.372
+# 2 35-75bp                -0.0276     0.131
+# 3 75-150bp               -0.0219    -0.205
+# 4 >150bp                 -0.0252     0    
+# 
+# yap1 at tfap2c (tead4single_tfap2c)
+# binned_distance median_contrib log_ratio
+# <fct>                    <dbl>     <dbl>
+#   1 <35bp                   0.185      1.46 
+# 2 35-75bp                 0.139      1.04 
+# 3 75-150bp                0.0987     0.549
+# 4 >150bp                  0.0674     0 
+# 
+# yap1 at cdx2 (tead4single_cdx2)
+# # A tibble: 4 × 3
+# binned_distance median_contrib log_ratio
+# <fct>                    <dbl>     <dbl>
+#   1 <35bp                  -0.0418    0.109 
+# 2 35-75bp                -0.0425    0.131 
+# 3 75-150bp               -0.0402    0.0533
+# 4 >150bp                 -0.0388    0   
+
+# Yap1 at TFAP2C (single)
+yap1_tfap2c <- data.frame(
+  binned_distance = factor(c("a_<35bp", "b_35-75bp", "c_75-150bp", "d_>150bp")),
+  median_contrib = c(0.185, 0.139, 0.0987, 0.0674),
+  log_ratio = c(1.46, 1.04, 0.549, 0),
+  contrib_of = "yap1",
+  contrib_at = "tfap2c",
+  motif_pair = "tead4single_tfap2c"
+)
+
+
+# TEAD4 at TFAP2C (single)
+tead4single_tfap2c <- data.frame(
+  binned_distance = factor(c("a_<35bp", "b_35-75bp", "c_75-150bp", "d_>150bp")),
+  median_contrib = c(0.493, 0.313, 0.210, 0.135),
+  log_ratio = c(1.86, 1.21, 0.636, 0),
+  contrib_of = "tead4",
+  contrib_at = "tfap2c",
+  motif_pair = "tead4single_tfap2c"
+)
+
+# TEAD4 at CDX2
+tead4_cdx2 <- data.frame(
+  binned_distance = factor(c("a_<35bp", "b_35-75bp", "c_75-150bp", "d_>150bp")),
+  median_contrib = c(0.0640, 0.0365, 0.0159, 0.00694),
+  log_ratio = c(3.0, 2.39, 1.20, 0),
+  contrib_of = "tead4",
+  contrib_at = "cdx2",
+  motif_pair = "tead4single_cdx2"
+)
+
+# Yap1 at CDX2
+yap1_cdx2 <- data.frame(
+  binned_distance = factor(c("a_<35bp", "b_35-75bp", "c_75-150bp", "d_>150bp")),
+  median_contrib = c(-0.0418, -0.0425, -0.0402, -0.0388),
+  log_ratio = c(0.109, 0.131,0.0533, 0),
+  contrib_of = "yap1",
+  contrib_at = "cdx2",
+  motif_pair = "tead4single_cdx2"
+)
+
+
+# TEAD4 at GATA3
+tead4_gata3 <- data.frame(
+  binned_distance = factor(c("a_<35bp", "b_35-75bp", "c_75-150bp", "d_>150bp")),
+  median_contrib = c(0.0165, 0.00503, 0.0224, 0.00895),
+  log_ratio = c(0.878, -0.832, 1.32, 0),
+  contrib_of = "tead4",
+  contrib_at = "gata3",
+  motif_pair = "tead4single_gata3"
+)
+# Yap1 at GATA3
+yap1_gata3 <- data.frame(
+  binned_distance = factor(c("a_<35bp", "b_35-75bp", "c_75-150bp", "d_>150bp")),
+  median_contrib = c(-0.0195, -0.0276, -0.0219,  -0.0252),
+  log_ratio = c(-0.372, 0.131,-0.205, 0),
+  contrib_of = "yap1",
+  contrib_at = "gata3",
+  motif_pair = "tead4single_gata3"
+)
+
+
+# TEAD4 at TFAP2C (double)
+tead4double_tfap2c <- data.frame(
+  binned_distance = factor(c("a_<35bp", "b_35-75bp", "c_75-150bp", "d_>150bp")),
+  median_contrib = c(0.575, 0.309, 0.164, 0.156),
+  log_ratio = c(1.88, 0.983, 0.0705, 0),
+  contrib_of = "tead4",
+  contrib_at = "tfap2c",
+  motif_pair = "tead4double_tfap2c"
+)
+
+# YAP1 at TFAP2C (double)
+yap1double_tfap2c <- data.frame(
+  binned_distance = factor(c("a_<35bp", "b_35-75bp", "c_75-150bp", "d_>150bp")),
+  median_contrib = c(0.222, 0.137, 0.0606, 0.0887),
+  log_ratio = c(1.32, 0.624, -0.550, 0),
+  contrib_of = "yap1",
+  contrib_at = "tfap2c",
+  motif_pair = "tead4double_tfap2c"
+)
+
+
+
+combined_df <- rbind(tead4single_tfap2c, yap1_tfap2c,  tead4_cdx2, yap1_cdx2,tead4_gata3, yap1_gata3,tead4double_tfap2c,yap1double_tfap2c)
+colnames(combined_df) <- c("Binned Distance", "Median Contribution", "Log Ratio", "Contributing TF", "Target Motif", "Motif Pair")
+
+# Assuming binned_data is your dataframe with the required columns
+
+ggplot(combined_df, aes(x = `Binned Distance`, y = 0.5, fill = `Log Ratio`)) +
+  geom_bar(stat = "identity", color = "black", width = 0.6) +
+  scale_fill_gradient2(low = "#0F4C87", mid = "white", high = "#C22029", 
+                       midpoint = 0, limits = c(-1, 3), 
+                       breaks = seq(-1, 3, by = 0.5)) +
+  theme_classic() +
+  labs(x = "Binned Distance (bp)", 
+       y = NULL,  # No y-axis label as all bars have the same height
+       fill = "Log ratio") +
+  theme(legend.position = "top",
+        legend.title = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 9),
+        axis.title.x = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(size = 5),
+        axis.text.y = element_blank(),  # Remove y-axis text
+        strip.text = element_text(size = 10, face = "bold"),
+        plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+        legend.direction = "horizontal",
+        legend.key.height = unit(0.4, "cm"),
+        legend.key.width = unit(1, "cm"),
+        axis.ticks.y = element_blank()) +  # Remove y-axis ticks
+  facet_grid(`Contributing TF` ~ `Target Motif` + `Motif Pair`, scales = "free_y")
+
+##for main figure
+
+ggplot(yap1_tead4single_tfap2c, aes(x = binned_distance, y = log_ratio, fill = log_ratio)) +
+  geom_bar(stat = "identity", color = "black", width = 0.6) +
+  scale_fill_gradient2(low = "#0F4C87", mid = "white", high = "#C22029", 
+                       midpoint = 0, limits = c(0, 1.5),  
+                       breaks = seq(0, 1.5, by = 0.5)) +  
+  theme_minimal() +
+  labs(x = "Binned Distance (bp)", 
+       y = "Log Ratio of Median Contribution", 
+       fill = "Log ratio") +
+  theme(legend.position = "top",
+        legend.title = element_text(size = 10, face = "bold"),
+        legend.text = element_text(size = 9),
+        axis.title.x = element_text(size = 10, face = "bold"),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.x = element_text(size = 9),
+        axis.text.y = element_text(size = 9),
+        strip.text = element_text(size = 10, face = "bold"),
+        plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+        legend.direction = "horizontal",
+        legend.key.height = unit(0.4, "cm"),
+        legend.key.width = unit(1, "cm")) +
+  scale_y_continuous(breaks = seq(0, 1.5, by = 0.5), limits = c(0,1.5))
+
+
+all_tf_final_no_promoter.gr<-readr::read_tsv("/n/projects/kd2200/publication/bpnet/analysis/tsv/all_tfregions_with_binding_activity.tsv") %>% makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based =F)
+
+## test
+tead4_cdx2_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Cdx2-1_Tead4-1")
+td.gr <-tead4_cdx2_1 %>% subset(tf == "Tead4")
+cd.gr <- tead4_cdx2_1 %>% subset(tf== "Cdx2")
+t <- distanceToNearest(td.gr, cd.gr)
+g <- t@elementMetadata
+s <- g$distance<=180
+s <- t[s]
+td_cd <-td.gr[s@from]
+td_cd$td_tf_motif_dis <- s@elementMetadata
+td_cd <- td_cd[order(td_cd$td_tf_motif_dis, decreasing = F)]
+q <- find_overlaps(cd.gr, td_cd, maxgap = 180)   
+q$seq <- getSeq(bsgenome, q, as.character = T)
+ggplot() + geom_logo(q$seq) + theme_logo()
+q$contrib_yap1_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q$contrib_tead4_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$tead4)
+q$contrib_cdx2_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$cdx2)
+q.df <- as.data.frame(q)
+# Define the custom breakpoints for binning
+breaks <- c(-Inf, 35, 75, 150, Inf)
+# Apply the cut function to create the binned_distance column
+q.df$binned_distance <- cut(q.df$distance, 
+                            breaks = breaks, 
+                            labels = c("<35", "35-75", "75-150", ">150"), 
+                            include.lowest = TRUE)
+# kruskal.test(contrib_tead4_atcd_motif ~ as.factor(binned_distance), data = q.df)
+# 
+# dunnTest(contrib_tead4_atcd_motif  ~ as.factor(binned_distance), data = q.df, method="bh")
+# Dunn (1964) Kruskal-Wallis multiple comparison
+# p-values adjusted with the Benjamini-Hochberg method.
+# Comparison         Z      P.unadj        P.adj
+# 1     <35 - >150  5.165309 2.400419e-07 7.201258e-07
+# #2    <35 - 35-75  2.450993 1.424626e-02 1.709551e-02
+# 3   >150 - 35-75 -3.335530 8.513706e-04 1.702741e-03
+# 4   <35 - 75-150  5.500525 3.786628e-08 2.271977e-07
+# #5  >150 - 75-150 -1.239775 2.150585e-01 2.150585e-01
+# #6 35-75 - 75-150  2.947466 3.203900e-03 4.805851e-03
+# 
+# 
+# dunnTest(contrib_yap1_attf_motif  ~ as.factor(binned_distance), data = q.df, method="bh",two.sided=TRUE)
+# Comparison          Z       P.unadj         P.adj
+# 1     <35 - >150  22.660856 1.090404e-113 6.542426e-113
+# 2    <35 - 35-75   5.995975  2.022676e-09  2.427211e-09
+# 3   >150 - 35-75 -12.952076  2.286851e-38  6.860553e-38
+# 4   <35 - 75-150  12.070428  1.513442e-33  3.026885e-33
+# 5  >150 - 75-150  -7.422647  1.148028e-13  1.722041e-13
+# 6 35-75 - 75-150   5.184789  2.162594e-07  2.162594e-07
+# 
+# dunnTest(contrib_tead4_attf_motif  ~ as.factor(binned_distance), data = q.df, method="bh",two.sided=TRUE)
+# Comparison          Z       P.unadj         P.adj
+# 1     <35 - >150  29.711485 5.456870e-194 3.274122e-193
+# 2    <35 - 35-75   7.393109  1.434345e-13  1.434345e-13
+# 3   >150 - 35-75 -17.515033  1.100228e-68  3.300685e-68
+# 4   <35 - 75-150  16.834041  1.373974e-63  2.747947e-63
+# 5  >150 - 75-150  -8.562376  1.105648e-17  1.658472e-17
+# 6 35-75 - 75-150   8.168117  3.132398e-16  3.758878e-16
+# 
+# dunnTest(contrib_tead4_attf_motif  ~ as.factor(binned_distance), data = q.df, method="bh",two.sided=TRUE) #tdbl
+# Comparison         Z      P.unadj        P.adj
+# 1     <35 - >150  9.614479 6.946042e-22 4.167625e-21
+# 2    <35 - 35-75  3.239582 1.197052e-03 1.795579e-03
+# 3   >150 - 35-75 -4.568998 4.900626e-06 9.801253e-06
+# 4   <35 - 75-150  7.026469 2.118251e-12 6.354752e-12
+# 5  >150 - 75-150 -1.023351 3.061420e-01 3.061420e-01
+# 6 35-75 - 75-150  3.145299 1.659169e-03 1.991003e-03
+# 
+# 
+# dunnTest(contrib_yap1_attf_motif  ~ as.factor(binned_distance), data = q.df, method="bh",two.sided=TRUE)
+# Comparison          Z      P.unadj        P.adj
+# 1     <35 - >150  8.1239989 4.510697e-16 2.706418e-15
+# 2    <35 - 35-75  2.3851878 1.707040e-02 2.048449e-02
+# 3   >150 - 35-75 -4.2485176 2.151897e-05 4.303794e-05
+# 4   <35 - 75-150  6.8411637 7.855242e-12 2.356573e-11
+# 5  >150 - 75-150  0.1475777 8.826760e-01 8.826760e-01
+# 6 35-75 - 75-150  3.7955534 1.473145e-04 2.209718e-04
+# 
+# ##yap1_attf
+# kruskal.test(contrib_yap1_attf_motif  ~ as.factor(binned_distance), data = q.df)
+# data:  contrib_yap1_attf_motif by as.factor(binned_distance)
+# Kruskal-Wallis chi-squared = 564.94, df = 3, p-value < 2.2e-16
+# 
+# ##tead4_attf
+# kruskal.test(contrib_tead4_attf_motif ~ as.factor(binned_distance), data = q.df)
+# data:  contrib_tead4_attf_motif by as.factor(binned_distance)
+# Kruskal-Wallis chi-squared = 985.36, df = 3, p-value < 2.2e-16
+# 
+# ##tead4_atcd
+# kruskal.test(contrib_tead4_atcd_motif ~ as.factor(binned_distance), data = q.df)
+# data:  contrib_tead4_atcd_motif by as.factor(binned_distance)
+# Kruskal-Wallis chi-squared = 42.661, df = 3, p-value = 2.905e-09
+# 
+# ##tead4_atgat
+# kruskal.test(contrib_tead4_atgat_motif ~ as.factor(binned_distance), data = q.df)
+# data:  contrib_tead4_atgat_motif by as.factor(binned_distance)
+# Kruskal-Wallis chi-squared = 7.5123, df = 3, p-value = 0.05724
+# 
+# ##tead4_attf (tdbl)
+# kruskal.test(contrib_tead4_attf_motif ~ as.factor(binned_distance), data = q.df)
+# data:  contrib_tead4_attf_motif by as.factor(binned_distance)
+# Kruskal-Wallis chi-squared = 102.55, df = 3, p-value < 2.2e-16
+# 
+# ##yap1_attf (tdbl)
+# kruskal.test(contrib_yap1_attf_motif ~ as.factor(binned_distance), data = q.df)
+# data:  contrib_tead4_attf_motif by as.factor(binned_distance)
+# Kruskal-Wallis chi-squared = 81.206, df = 3, p-value < 2.2e-16
+
+## wilxocn test
+breaks <- c(-Inf, 35, 75, 150, Inf)
+# Apply the cut function to create the binned_distance column
+q.df$binned_distance <- cut(q.df$distance, 
+                            breaks = breaks, 
+                            labels = c("<35", "35-75", "75-150", ">150"), 
+                            include.lowest = TRUE)
+pairwise_results <- pairwise.wilcox.test(q.df$contrib_yap1_attf_motif, q.df$binned_distance, p.adjust.method = "bonferroni")
+# Pairwise comparisons using Wilcoxon rank sum test with continuity correction 
+# 
+# data:  q.df$contrib_yap1_attf_motif and q.df$binned_distance 
+# 
+# <35     35-75   75-150 
+# 35-75  1.4e-11 -       -      
+#   75-150 < 2e-16 4.5e-07 -      
+#   >150   < 2e-16 < 2e-16 6.7e-14
+# 
+# P value adjustment method: bonferroni
+
+pairwise_results <- pairwise.wilcox.test(q.df$contrib_tead4_attf_motif, q.df$binned_distance, p.adjust.method = "bonferroni")
+
+# data:  q.df$contrib_tead4_attf_motif and q.df$binned_distance 
+# 
+# <35    35-75  75-150
+# 35-75  <2e-16 -      -     
+#   75-150 <2e-16 <2e-16 -     
+#   >150   <2e-16 <2e-16 <2e-16
+
+
+##cdx2
+tead4_cdx2_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Cdx2-1_Tead4-1")
+td.gr <-tead4_cdx2_1 %>% subset(tf == "Tead4")
+cd.gr <- tead4_cdx2_1 %>% subset(tf== "Cdx2")
+
+t <- distanceToNearest(td.gr, cd.gr)
+g <- t@elementMetadata
+s <- g$distance<=500 #keeping 200 for cdx2 for TEAD4 and 500 for yap1 as 500 boosts shorter range for tead4
+s <- t[s]
+td_cd <-td.gr[s@from]
+td_cd$td_tf_motif_dis <- s@elementMetadata
+td_cd <- td_cd[order(td_cd$td_tf_motif_dis, decreasing = F)]
+
+
+
+q <- find_overlaps(cd.gr, td_cd, maxgap = 500)   
+
+q$contrib_yap1_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q$contrib_tead4_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$tead4)
+q$contrib_cdx2_atcd_motif <- regionSums(q, tsc.contrib.profile.bws$cdx2)
+q.df <- as.data.frame(q)                                                                                                                            breaks <- c(-Inf, 35, 75, 150, Inf)
+# Apply the cut function to create the binned_distance column
+q.df$binned_distance <- cut(q.df$distance, 
+                            breaks = breaks, 
+                            labels = c("<35", "35-75", "75-150", ">150"), 
+                            include.lowest = TRUE)
+pairwise.wilcox.test(q.df$contrib_yap1_atcd_motif, q.df$binned_distance, p.adjust.method = "bonferroni") 
+# Pairwise comparisons using Wilcoxon rank sum test with continuity correction 
+# 
+# data:  q.df$contrib_yap1_atcd_motif and q.df$binned_distance 
+# 
+# <35  35-75 75-150
+# 35-75  1.00 -     -     
+#   75-150 1.00 1.00  -     
+#   >150   0.58 0.21  1.00  
+# 
+# P value adjustment method: bonferroni 
+pairwise.wilcox.test(q.df$contrib_tead4_atcd_motif, q.df$binned_distance, p.adjust.method = "bonferroni")
+
+# Pairwise comparisons using Wilcoxon rank sum test with continuity correction 
+# 
+# data:  q.df$contrib_tead4_atcd_motif and q.df$binned_distance 
+# 
+# <35     35-75   75-150
+# 35-75  0.041   -       -     
+#   75-150 3.0e-07 0.010   -     
+#   >150   9.9e-15 3.2e-08 0.052 
+# 
+# P value adjustment method: bonferroni
+
+# Ensure >150bp group is included and then summarize
+binned_data <- q.df %>%
+  mutate(binned_distance = cut(distance, breaks = c(-Inf, 35, 75, 150, Inf), 
+                               labels = c("<35bp", "35-75bp", "75-150bp", ">150bp"))) %>%
+  group_by(binned_distance) %>%
+  summarize(median_contrib = median(contrib_yap1_atcd_motif, na.rm = TRUE))
+
+# Find the median contribution for the >150bp group
+baseline_median <- binned_data %>% 
+  filter(binned_distance == ">150bp") %>% 
+  pull(median_contrib)
+
+# Calculate the log ratio relative to the baseline
+binned_data <- binned_data %>%
+  mutate(log_ratio = log2(median_contrib / baseline_median))
+binned_data
+
+##gata3
+tead4_gata3_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Gata3-1_Tead4-1")
+td.gr <- tead4_gata3_1 %>% subset(tf == "Tead4")
+gat.gr <- tead4_gata3_1 %>% subset(tf== "Gata3")
+
+t <- distanceToNearest(td.gr, gat.gr)
+g <- t@elementMetadata
+s <- g$distance<=500
+s <- t[s]
+td_gt <-tead4_gata3_1[s@from]
+td_gt$td_gt_motif_dis <- s@elementMetadata
+td_gt <- td_gt[order(td_gt$td_gt_motif_dis, decreasing = F)]
+
+gat.gr$seq <- getSeq(bsgenome, gat.gr, as.character = T)
+ggplot() + geom_logo(gat.gr$seq) + theme_logo()    
+
+
+q <- find_overlaps( gat.gr, td_gt, maxgap = 500)   
+q$seq <- getSeq(bsgenome, q, as.character = T)
+ggplot() + geom_logo(q$seq) + theme_logo()
+q$contrib_yap1_atgat_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q$contrib_tead4_atgat_motif <- regionSums(q, tsc.contrib.profile.bws$tead4)
+q.df <- as.data.frame(q)
+breaks <- c(-Inf, 35, 75, 150, Inf)
+# Apply the cut function to create the binned_distance column
+q.df$binned_distance <- cut(q.df$distance, 
+                            breaks = breaks, 
+                            labels = c("<35", "35-75", "75-150", ">150"), 
+                            include.lowest = TRUE)
+pairwise.wilcox.test(q.df$contrib_yap1_atgat_motif, q.df$binned_distance, p.adjust.method = "bonferroni")
+# data:  q.df$contrib_yap1_atgat_motif and q.df$binned_distance 
+# 
+# <35  35-75 75-150
+# 35-75  0.24 -     -     
+#   75-150 1.00 0.92  -     
+#   >150   0.35 1.00  1.00  
+# 
+# P value adjustment method: bonferroni
+pairwise.wilcox.test(q.df$contrib_tead4_atgat_motif, q.df$binned_distance, p.adjust.method = "bonferroni")
+# data:  q.df$contrib_tead4_atgat_motif and q.df$binned_distance 
+# 
+# <35   35-75 75-150
+# 35-75  1.000 -     -     
+#   75-150 1.000 0.176 -     
+#   >150   1.000 1.000 0.029 
+# 
+# P value adjustment method: bonferroni
+
+# data:  q.df$contrib_cdx2_atcd_motif and q.df$binned_distance 
+# 
+# <35     35-75 75-150
+# 35-75  0.906   -     -     
+#   75-150 0.027   1.000 -     
+#   >150   8.7e-06 0.011 0.424 
+# 
+# P value adjustment method: bonferroni
+# Ensure >150bp group is included and then summarize
+binned_data <- q.df %>%
+  mutate(binned_distance = cut(distance, breaks = c(-Inf, 35, 75, 150, Inf), 
+                               labels = c("<35bp", "35-75bp", "75-150bp", ">150bp"))) %>%
+  group_by(binned_distance) %>%
+  summarize(median_contrib = median(contrib_yap1_atgat_motif, na.rm = TRUE))
+
+# Find the median contribution for the >150bp group
+baseline_median <- binned_data %>% 
+  filter(binned_distance == ">150bp") %>% 
+  pull(median_contrib)
+
+# Calculate the log ratio relative to the baseline
+binned_data <- binned_data %>%
+  mutate(log_ratio = log2(median_contrib / baseline_median))
+binned_data
+
+
+##tead4double
+
+tead4double_tfap2c_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Tead4_double-1_Tfap2c-1")
+tdbl.gr <-tead4double_tfap2c_1 %>% subset(tf == "Tead4_double")
+tf.gr <- tead4double_tfap2c_1 %>% subset(tf== "Tfap2c")
+
+t <- distanceToNearest(tdbl.gr, tf.gr)
+g <- t@elementMetadata
+s <- g$distance<=500
+s <- t[s]
+tdbl_tf <- tdbl.gr[s@from]
+tdbl_tf$td_tf_motif_dis <- s@elementMetadata
+tdbl_tf <- tdbl_tf[order(tdbl_tf$td_tf_motif_dis, decreasing = F)]
+
+tf.gr$seq <- getSeq(bsgenome,  tf.gr, as.character = T)
+ggplot() + geom_logo(tf.gr$seq) + theme_logo()    
+
+
+q <- find_overlaps( tf.gr, tdbl_tf, maxgap = 500)   
+q$seq <- getSeq(bsgenome, q, as.character = T)
+ggplot() + geom_logo(q$seq) + theme_logo()
+q$contrib_yap1_attf_motif <- regionSums(q, tsc.contrib.profile.bws$yap1)
+q$contrib_tead4_attf_motif <- regionSums(q, tsc.contrib.profile.bws$tead4)
+q.df <- as.data.frame(q)
+
+breaks <- c(-Inf, 35, 75, 150, Inf)
+# Apply the cut function to create the binned_distance column
+q.df$binned_distance <- cut(q.df$distance, 
+                            breaks = breaks, 
+                            labels = c("<35", "35-75", "75-150", ">150"), 
+                            include.lowest = TRUE)
+pairwise.wilcox.test(q.df$contrib_yap1_attf_motif, q.df$binned_distance, p.adjust.method = "bonferroni")
+# data:  q.df$contrib_yap1_attf_motif and q.df$binned_distance 
+# 
+# <35     35-75   75-150 
+# 35-75  0.02315 -       -      
+#   75-150 2.4e-09 0.00033 -      
+#   >150   1.7e-15 4.6e-05 1.00000
+# 
+# P value adjustment method: bonferroni 
+
+pairwise.wilcox.test(q.df$contrib_tead4_attf_motif, q.df$binned_distance, p.adjust.method = "bonferroni")
+# 
+# data:  q.df$contrib_tead4_attf_motif and q.df$binned_distance 
+# 
+# <35     35-75   75-150
+# 35-75  2.5e-05 -       -     
+#   75-150 2.3e-11 0.0015  -     
+#   >150   < 2e-16 1.5e-06 1.0000
+# 
+# P value adjustment method: bonferroni 
+# Ensure >150bp group is included and then summarize
+binned_data <- q.df %>%
+  mutate(binned_distance = cut(distance, breaks = c(-Inf, 35, 75, 150, Inf), 
+                               labels = c("<35bp", "35-75bp", "75-150bp", ">150bp"))) %>%
+  group_by(binned_distance) %>%
+  summarize(median_contrib = median(contrib_yap1_attf_motif, na.rm = TRUE))
+
+# Find the median contribution for the >150bp group
+baseline_median <- binned_data %>% 
+  filter(binned_distance == ">150bp") %>% 
+  pull(median_contrib)
+
+# Calculate the log ratio relative to the baseline
+binned_data <- binned_data %>%
+  mutate(log_ratio = log2(median_contrib / baseline_median))
+binned_data
+
+```
+
+# normalized slope values
+```{r,eval=FALSE}
+
+all_tf_final_no_promoter.gr<-readr::read_tsv("/n/projects/kd2200/publication/bpnet/analysis/tsv/all_tfregions_with_binding_activity.tsv") %>%
+  makeGRangesFromDataFrame(keep.extra.columns = T, starts.in.df.are.0based =F)
+
+all_tf_final_no_promoter.gr$contrib_tfap2c <- regionSums(resize(all_tf_final_no_promoter.gr , 300, "center"), tsc.contrib.profile.bws$tfap2c)  
+all_tf_final_no_promoter.gr$contrib_tead4 <- regionSums(resize(all_tf_final_no_promoter.gr , 300, "center"), tsc.contrib.profile.bws$tead4)
+all_tf_final_no_promoter.gr$contrib_yap1 <- regionSums(resize(all_tf_final_no_promoter.gr , 300, "center"), tsc.contrib.profile.bws$yap1)
+all_tf_final_no_promoter.gr$contrib_cdx2 <- regionSums(resize(all_tf_final_no_promoter.gr , 300, "center"), tsc.contrib.profile.bws$cdx2)
+all_tf_final_no_promoter.gr$contrib_gata3 <- regionSums(resize(all_tf_final_no_promoter.gr , 300, "center"), tsc.contrib.profile.bws$gata3) 
+
+tead4_tfap2c_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Tead4-1_Tfap2c-1")
+td.gr <-tead4_tfap2c_1 %>% subset(tf == "Tead4")
+tf.gr <- tead4_tfap2c_1 %>% subset(tf== "Tfap2c")
+
+t <- distanceToNearest(td.gr, tf.gr)
+g <- t@elementMetadata
+s <- g$distance<=160
+s <- t[s]
+td_tf <-tead4_tfap2c_1[s@from]
+td_tf$td_tf_motif_dis <- s@elementMetadata
+td_tf <- td_tf[order(td_tf$td_tf_motif_dis, decreasing = F)]
+td_tf3 <- td_tf[1:1550,]
+
+tead4_gata3_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Gata3-1_Tead4-1")
+td.gr <- tead4_gata3_1 %>% subset(tf == "Tead4")
+gat.gr <- tead4_gata3_1 %>% subset(tf== "Gata3")
+
+t <- distanceToNearest(td.gr, gat.gr)
+g <- t@elementMetadata
+s <- g$distance<=160
+s <- t[s]
+td_gt <-tead4_gata3_1[s@from]
+td_gt$td_gt_motif_dis <- s@elementMetadata
+td_gt <- td_gt[order(td_gt$td_gt_motif_dis, decreasing = F)]
+
+tead4_cdx2_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Cdx2-1_Tead4-1")
+td.gr <-tead4_cdx2_1 %>% subset(tf == "Tead4")
+cd.gr <- tead4_cdx2_1 %>% subset(tf== "Cdx2")
+
+t <- distanceToNearest(td.gr, cd.gr)
+g <- t@elementMetadata
+s <- g$distance<=160
+s <- t[s]
+td_cd <-td.gr[s@from]
+td_cd$td_tf_motif_dis <- s@elementMetadata
+td_cd <- td_cd[order(td_cd$td_tf_motif_dis, decreasing = F)]
+
+
+tead4double_tfap2c_1 <-subset(all_tf_final_no_promoter.gr,island_content=="Tead4_double-1_Tfap2c-1")
+tdbl.gr <-tead4double_tfap2c_1 %>% subset(tf == "Tead4_double")
+tf.gr <- tead4double_tfap2c_1 %>% subset(tf== "Tfap2c")
+
+t <- distanceToNearest(tdbl.gr, tf.gr)
+g <- t@elementMetadata
+s <- g$distance<=160
+s <- t[s]
+tdbl_tf <- tdbl.gr[s@from]
+tdbl_tf$td_tf_motif_dis <- s@elementMetadata
+tdbl_tf <- tdbl_tf[order(tdbl_tf$td_tf_motif_dis, decreasing = F)]
+
+td_tf3.df <- as.data.frame(td_tf3)
+  td_gt.df <- as.data.frame(td_gt)
+  td_cd.df <- as.data.frame(td_cd)
+  tdbl_tf.df <- as.data.frame(tdbl_tf)
+  
+  data_list <- list(td_tf3.df, td_gt.df, td_cd.df, tdbl_tf.df)
+
+calculate_metrics <- function(data, distance_col, signal_col) {
+  # Build the formula dynamically
+  formula <- as.formula(paste(signal_col, "~", distance_col))
+  
+  # Fit the linear model
+  model <- lm(formula, data = data)
+  
+  # Extract coefficients
+  coeffs <- summary(model)$coefficients
+  
+  # Extract p-value and slope (m_coefficient)
+  p_value <- coeffs[2, 4]
+  m_coefficient <- coeffs[2, 1]
+  
+  # Extract intercept (the first coefficient)
+  intercept <- coeffs[1, 1]
+  
+  # Calculate normalized slope: slope/intercept * 100 * 10
+  normalized_slope <- (m_coefficient / intercept) * 100 * 10 #which represents the percent change per 10 base pairs.
+  
+  # Calculate R-squared and RMSE
+  r_squared <- summary(model)$r.squared
+  predicted_signal <- predict(model, data)
+  rmse <- sqrt(mean((data[[signal_col]] - predicted_signal)^2))
+  
+  # Return all metrics including normalized slope
+  return(data.frame(
+    p_value = p_value,
+    m_coefficient = m_coefficient,
+    r_squared = r_squared,
+    rmse = rmse,
+    normalized_slope = normalized_slope
+  ))
+}
+
+distance_col <- "distance"
+signal_col <- "contrib_yap1"
+
+# Apply the function to each data frame in the list
+results <- lapply(data_list, calculate_metrics, distance_col = distance_col, signal_col = signal_col)
+
+# Combine the results into a single data frame
+final_results <- do.call(rbind, results)
+final_results 
+
+
+
+# tead4
+distance_col <- "distance"
+signal_col <- "contrib_tead4"
+
+# Apply the function to each data frame in the list
+results <- lapply(data_list, calculate_metrics, distance_col = distance_col, signal_col = signal_col)
+
+# Combine the results into a single data frame
+final_results <- do.call(rbind, results)
+final_results 
+
+#tfap2c
+distance_col <- "distance"
+signal_col <- "contrib_tfap2c"
+
+# Apply the function to each data frame in the list
+results <- lapply(data_list, calculate_metrics, distance_col = distance_col, signal_col = signal_col)
+
+# Combine the results into a single data frame
+final_results <- do.call(rbind, results)
+final_results 
+
+#cdx2
+distance_col <- "distance"
+signal_col <- "contrib_cdx2"
+
+# Apply the function to each data frame in the list
+results <- lapply(data_list, calculate_metrics, distance_col = distance_col, signal_col = signal_col)
+
+# Combine the results into a single data frame
+final_results <- do.call(rbind, results)
+final_results 
+
+#gata3
+distance_col <- "distance"
+signal_col <- "contrib_gata3"
+
+# Apply the function to each data frame in the list
+results <- lapply(data_list, calculate_metrics, distance_col = distance_col, signal_col = signal_col)
+
+# Combine the results into a single data frame
+final_results <- do.call(rbind, results)
+final_results 
+
+```
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+# Session Information
+
+For the purposes of reproducibility, the R/Bioconductor session information is printed below:
+
+```{r sessioninfo}
+sessionInfo()
+```

@@ -1,0 +1,8 @@
+cd /n/projects/mw2098/analysis/bpnet/models/kb2009/bpnet
+python /n/projects/mw2098/shared_code/bpnet/bpnet_export_large_bw.py -m model/ZDT_mbt_default -o contrib/ZDT_mbt_default/bw/test -f /n/projects/mw2098/genomes/dm6/dm6.fa -c /n/projects/mw2098/genomes/dm6/dm6.chrom.sizes.txt -r bed/test.bed
+
+
+Rscript /n/projects/mw2098/shared_code/rscripts/merge_bigwigs.r -f=contrib/ZDT_mbt_default/bw/test_chr*.Dl.contrib.counts.bw -o=contrib/ZDT_mbt_default/bw/test.Dl.contrib.counts.bw -g=BSgenome.Dmelanogaster.UCSC.dm6
+Rscript /n/projects/mw2098/shared_code/rscripts/merge_bigwigs.r --files contrib/ZDT_mbt_default/bw/test_chr*.Dl.contrib.profile.bw --output contrib/ZDT_mbt_default/bw/test.Dl.contrib.profile.bw --bsgenome BSgenome.Dmelanogaster.UCSC.dm6
+Rscript /n/projects/mw2098/shared_code/rscripts/merge_bigwigs.r --files contrib/ZDT_mbt_default/bw/test_chr*.Dl.preds.pos.bw --output contrib/ZDT_mbt_default/bw/test.Dl.preds.pos.bw --bsgenome BSgenome.Dmelanogaster.UCSC.dm6
+Rscript /n/projects/mw2098/shared_code/rscripts/merge_bigwigs.r --files contrib/ZDT_mbt_default/bw/test_chr*.Dl.preds.neg.bw --output contrib/ZDT_mbt_default/bw/test.Dl.preds.neg.bw --bsgenome BSgenome.Dmelanogaster.UCSC.dm6
